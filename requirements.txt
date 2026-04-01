@@ -1,0 +1,13 @@
+torch
+torchvision
+transformers
+nltk
+pycocoevalcap
+matplotlib
+gradio
+pandas
+Pillow
+tqdm
+scikit-learn
+seaborn
+wordcloud

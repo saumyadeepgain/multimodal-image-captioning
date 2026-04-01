@@ -1,0 +1,47 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg
+*.egg-info/
+dist/
+build/
+*.spec
+
+# Virtual environment
+venv/
+env/
+.venv/
+
+# Jupyter
+.ipynb_checkpoints/
+*.nbconvert.ipynb
+
+# Data (large files — download separately)
+data/archive/Images/
+data/archive/*.txt
+data/
+
+# Model checkpoints (large)
+checkpoints/*.pt
+checkpoints/*.pth
+
+# Logs
+*.log
+fix*.py
+fix_debug.txt
+rebuild_notebook.py
+inject_notebook.py
+
+# OS
+.DS_Store
+Thumbs.db
+
+# VS Code
+.vscode/
+
+# Distribution
+*.tar.gz
+*.zip
