@@ -139,3 +139,58 @@ def test_train_cli_resume_finished_run_is_noop(trained_checkpoint):
         )
     )
     assert len(hist["train_loss"]) == 2  # history restored, no extra epochs
+
+
+# ------------------------------------------------------------ predict: folders etc.
+def test_collect_images_from_folders(tmp_path):
+    (tmp_path / "sub").mkdir()
+    for name in ("b.jpg", "a.PNG", "notes.txt", "sub/c.jpeg"):
+        (tmp_path / name).write_bytes(b"x")
+    flat = predict.collect_images([str(tmp_path)])
+    assert [os.path.basename(p) for p in flat] == ["a.PNG", "b.jpg"]  # sorted, images only
+    deep = predict.collect_images([str(tmp_path)], recursive=True)
+    assert {os.path.basename(p) for p in deep} == {"a.PNG", "b.jpg", "c.jpeg"}
+    explicit = predict.collect_images([str(tmp_path / "notes.txt")])  # explicit files are kept
+    assert explicit == [str(tmp_path / "notes.txt")]
+    with pytest.raises(FileNotFoundError):
+        predict.collect_images([str(tmp_path / "missing")])
+
+
+@pytest.mark.parametrize("fmt", ["text", "json", "jsonl", "csv"])
+def test_predict_folder_all_formats(trained_checkpoint, tmp_path, fmt):
+    out = tmp_path / f"captions.{fmt}"
+    predict.main(
+        [trained_checkpoint["img_dir"], "--checkpoint", trained_checkpoint["checkpoint"],
+         "--device", "cpu", "--beam", "1", "--format", fmt, "--output", str(out)]
+    )  # fmt: skip
+    text = out.read_text()
+    if fmt == "json":
+        rows = json.loads(text)
+        assert len(rows) == 20 and all(r["status"] == "ok" for r in rows)
+    elif fmt == "jsonl":
+        assert len([json.loads(line) for line in text.splitlines()]) == 20
+    elif fmt == "csv":
+        lines = text.splitlines()
+        assert lines[0] == "image,caption,status" and len(lines) == 21
+    else:
+        assert len(text.splitlines()) == 20 and all("\t" in line for line in text.splitlines())
+
+
+def test_predict_save_attention_for_folder(trained_checkpoint, tmp_path):
+    folder = tmp_path / "imgs"
+    folder.mkdir()
+    for i in (1, 2):
+        src = os.path.join(trained_checkpoint["img_dir"], f"img_{i}.jpg")
+        (folder / f"img_{i}.jpg").write_bytes(open(src, "rb").read())
+    viz = tmp_path / "viz"
+    predict.main(
+        [str(folder), "--checkpoint", trained_checkpoint["checkpoint"], "--device", "cpu",
+         "--save-attention", str(viz), "--output", str(tmp_path / "out.txt")]
+    )  # fmt: skip
+    assert sorted(os.listdir(viz)) == ["img_1_attention.png", "img_2_attention.png"]
+
+
+def test_predict_no_images_exits_1(trained_checkpoint, tmp_path):
+    with pytest.raises(SystemExit) as exc:
+        predict.main([str(tmp_path), "--checkpoint", trained_checkpoint["checkpoint"]])
+    assert exc.value.code == 1
