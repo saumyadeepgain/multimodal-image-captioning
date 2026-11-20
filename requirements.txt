@@ -1,13 +1,18 @@
-torch
-torchvision
-transformers
-nltk
-pycocoevalcap
-matplotlib
-gradio
-pandas
-Pillow
-tqdm
-scikit-learn
-seaborn
-wordcloud
+# Core (training / inference)
+torch>=2.1
+torchvision>=0.16
+Pillow>=9.0
+numpy>=1.24
+nltk>=3.8          # only corpus_bleu is used; no tokenizer downloads needed
+tqdm>=4.65
+matplotlib>=3.7
+
+# Optional extras
+pycocoevalcap>=1.2  # CIDEr / ROUGE-L / METEOR (METEOR needs Java)
+gradio>=4.0         # app.py demo
+
+# Notebook / EDA
+pandas>=2.0
+seaborn>=0.12
+wordcloud>=1.9
+jupyter

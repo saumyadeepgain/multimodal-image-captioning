@@ -20,13 +20,14 @@ env/
 *.nbconvert.ipynb
 
 # Data (large files — download separately)
-data/archive/Images/
-data/archive/*.txt
 data/
 
 # Model checkpoints (large)
 checkpoints/*.pt
 checkpoints/*.pth
+checkpoints/*.json
+checkpoints/*.png
+.pytest_cache/
 
 # Logs
 *.log
