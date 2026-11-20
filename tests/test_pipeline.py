@@ -112,3 +112,40 @@ def test_end_to_end_train_eval_checkpoint(tiny_flickr, tmp_path):
     assert len(v2) == len(vocab) and "epoch" in meta
     metrics, samples = evaluate_captions(m2, ds["test_images"], v2, num_workers=0)
     assert 0.0 <= metrics["BLEU-4"] <= 1.0 and samples
+
+
+def test_kv_cache_matches_full_forward():
+    m = tiny_model(30).eval()
+    img, cap = torch.randn(2, 3, 64, 64), torch.randint(4, 30, (2, 9))
+    with torch.no_grad():
+        mem = m.encode(img)
+        full, full_attn = m.decoder(mem, cap, return_attention=True)
+        caches = m.decoder.init_cache(mem)
+        steps = [m.decoder.step(cap[:, t], t, caches, return_attention=True) for t in range(9)]
+    assert torch.allclose(torch.stack([s[0] for s in steps], 1), full, atol=1e-4)
+    assert torch.allclose(torch.stack([s[1] for s in steps], 1), full_attn, atol=1e-5)
+
+
+def test_batched_beam_matches_per_image_beam():
+    from src.inference import beam_search_batch
+    m = tiny_model(20).eval()
+    v = Vocabulary(1)
+    v.build_vocabulary([" ".join(f"w{i}" for i in range(16))])
+    imgs = torch.randn(3, 3, 64, 64)
+    batch_ids, _ = beam_search_batch(m, imgs, v, beam_size=4, max_length=10)
+    for i in range(3):
+        single, _ = beam_search(m, imgs[i:i + 1], v, beam_size=4, max_length=10)
+        n = len(single)
+        assert batch_ids[i][:n] == single
+
+
+def test_initial_loss_is_near_uniform():
+    """Guards against the tied-weight init bug: an untrained model should be
+    close to a uniform guess, i.e. loss ~ log(vocab_size)."""
+    import math
+    V = 500
+    m = ImageCaptioningModel(256, V, num_layers=2, nhead=4, pretrained=False).eval()
+    cap = torch.randint(4, V, (4, 12))
+    logits = m(torch.randn(4, 3, 64, 64), cap)
+    loss = torch.nn.functional.cross_entropy(logits.reshape(-1, V), cap[:, 1:].reshape(-1))
+    assert loss.item() < 1.5 * math.log(V)

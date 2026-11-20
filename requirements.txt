@@ -8,7 +8,7 @@ tqdm>=4.65
 matplotlib>=3.7
 
 # Optional extras
-pycocoevalcap>=1.2  # CIDEr / ROUGE-L / METEOR (METEOR needs Java)
+pycocoevalcap>=1.2  # only for --meteor (needs Java); CIDEr/ROUGE-L are built in
 gradio>=4.0         # app.py demo
 
 # Notebook / EDA

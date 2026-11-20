@@ -11,6 +11,8 @@ Old version vs. new:
   uses the GNMT length penalty, and returns the attention of the best beam.
 * The image encoder runs exactly once per image; ``max_length`` is clamped to
   the decoder's positional-encoding size so long generations cannot crash.
+* Both decoders use the decoder's KV-cache (one token per step instead of
+  re-running the whole prefix), and beam search is batched across images.
 """
 
 from __future__ import annotations
@@ -25,31 +27,36 @@ def _clamp_len(model, max_length: int) -> int:
     return min(max_length, model.decoder.max_seq_length - 1)
 
 
+def _memory(model, images, backbone_features, device):
+    if backbone_features is not None:
+        return model.encode(backbone_features=backbone_features.to(device))
+    return model.encode(images.to(device))
+
+
 @torch.no_grad()
 def greedy_decode(model, images: Optional[torch.Tensor], vocab, max_length: int = 30,
                   device="cpu", return_attention: bool = False, backbone_features=None):
     """Decode a batch. Returns ``(ids (B, L) incl. <start>, attentions or None)``.
 
     ``attentions`` has shape (B, L-1, 49): one spatial map per generated token.
+    Uses the decoder KV-cache, so each step processes a single token.
     """
     model.eval()
-    if backbone_features is not None:
-        memory = model.encode(backbone_features=backbone_features.to(device))
-    else:
-        memory = model.encode(images.to(device))
-    B = memory.size(0)
+    memory = _memory(model, images, backbone_features, device)
+    B, dev = memory.size(0), memory.device
     max_length = _clamp_len(model, max_length)
-    seqs = torch.full((B, 1), vocab.start_idx, dtype=torch.long, device=memory.device)
-    finished = torch.zeros(B, dtype=torch.bool, device=memory.device)
+    caches = model.decoder.init_cache(memory)
+    seqs = torch.full((B, 1), vocab.start_idx, dtype=torch.long, device=dev)
+    finished = torch.zeros(B, dtype=torch.bool, device=dev)
     attn_steps = []
-    for _ in range(max_length):
-        out = model.decoder(memory, seqs, return_attention=return_attention)
+    for t in range(max_length):
+        out = model.decoder.step(seqs[:, -1], t, caches, return_attention=return_attention)
         logits, attn = out if return_attention else (out, None)
-        nxt = logits[:, -1].argmax(-1)
+        nxt = logits.argmax(-1)
         nxt = torch.where(finished, torch.full_like(nxt, vocab.pad_idx), nxt)
         seqs = torch.cat([seqs, nxt[:, None]], dim=1)
         if attn is not None:
-            attn_steps.append(attn[:, -1])
+            attn_steps.append(attn)
         finished |= nxt.eq(vocab.end_idx)
         if finished.all():
             break
@@ -58,46 +65,60 @@ def greedy_decode(model, images: Optional[torch.Tensor], vocab, max_length: int 
 
 
 @torch.no_grad()
-def beam_search(model, image: torch.Tensor, vocab, beam_size: int = 3, max_length: int = 30,
-                length_penalty: float = 0.7, device="cpu", backbone_features=None
-                ) -> Tuple[List[int], float]:
-    """Beam search for ONE image (all beams evaluated in a single batch)."""
+def beam_search_batch(model, images: Optional[torch.Tensor], vocab, beam_size: int = 3,
+                      max_length: int = 30, length_penalty: float = 0.7, device="cpu",
+                      backbone_features=None) -> Tuple[List[List[int]], List[float]]:
+    """Beam search for a BATCH of images: all B x k hypotheses run as one batch
+    and share a KV-cache that is re-ordered whenever beams are re-ranked."""
     model.eval()
-    if backbone_features is not None:
-        memory = model.encode(backbone_features=backbone_features.to(device))
-    else:
-        memory = model.encode(image.to(device))
-    memory = memory[:1].expand(beam_size, -1, -1)
-    dev = memory.device
-    max_length = _clamp_len(model, max_length)
+    memory = _memory(model, images, backbone_features, device)
+    B, k, dev = memory.size(0), beam_size, memory.device
     V = model.decoder.fc_out.out_features
+    max_length = _clamp_len(model, max_length)
+    memory = memory.repeat_interleave(k, 0)                         # (B*k, S, E)
+    caches = model.decoder.init_cache(memory)
 
-    seqs = torch.full((beam_size, 1), vocab.start_idx, dtype=torch.long, device=dev)
-    scores = torch.full((beam_size,), float("-inf"), device=dev)
-    scores[0] = 0.0  # all beams start identical; keep only one alive at t=0
-    finished = torch.zeros(beam_size, dtype=torch.bool, device=dev)
-    lengths = torch.zeros(beam_size, device=dev)
+    seqs = torch.full((B * k, 1), vocab.start_idx, dtype=torch.long, device=dev)
+    scores = torch.full((B, k), float("-inf"), device=dev)
+    scores[:, 0] = 0.0          # all beams start identical; keep one alive at t=0
+    scores = scores.view(-1)
+    finished = torch.zeros(B * k, dtype=torch.bool, device=dev)
+    lengths = torch.zeros(B * k, device=dev)
+    pad_row = torch.full((V,), float("-inf"), device=dev)
+    pad_row[vocab.pad_idx] = 0.0
+    offsets = (torch.arange(B, device=dev) * k)[:, None]
 
-    for _ in range(max_length):
-        logp = F.log_softmax(model.decoder(memory, seqs)[:, -1].float(), dim=-1)
-        # A finished beam may only be extended by <pad> at zero cost.
-        pad_row = torch.full((V,), float("-inf"), device=dev)
-        pad_row[vocab.pad_idx] = 0.0
-        logp = torch.where(finished[:, None], pad_row[None], logp)
-        cand = (scores[:, None] + logp).view(-1)
-        top, idx = cand.topk(beam_size)
-        beam_idx, tok = idx // V, idx % V
-        seqs = torch.cat([seqs[beam_idx], tok[:, None]], 1)
-        was_finished = finished[beam_idx]
-        lengths = lengths[beam_idx] + (~was_finished).float()
+    for t in range(max_length):
+        logp = F.log_softmax(model.decoder.step(seqs[:, -1], t, caches).float(), dim=-1)
+        logp = torch.where(finished[:, None], pad_row[None], logp)  # finished: only <pad>, cost 0
+        cand = (scores[:, None] + logp).view(B, k * V)
+        top, idx = cand.topk(k, dim=-1)                              # (B, k)
+        src = (idx // V + offsets).view(-1)                          # flat source beam
+        tok = (idx % V).view(-1)
+        seqs = torch.cat([seqs[src], tok[:, None]], 1)
+        model.decoder.reorder_cache(caches, src)
+        was_finished = finished[src]
+        lengths = lengths[src] + (~was_finished).float()
         finished = was_finished | tok.eq(vocab.end_idx)
-        scores = top
+        scores = top.view(-1)
         if finished.all():
             break
 
-    lp = ((5.0 + lengths) / 6.0) ** length_penalty  # GNMT length penalty
-    best = int((scores / lp).argmax())
-    return seqs[best].tolist(), float(scores[best])
+    lp = ((5.0 + lengths) / 6.0) ** length_penalty                  # GNMT length penalty
+    norm = (scores / lp).view(B, k)
+    best = norm.argmax(-1) + offsets[:, 0]
+    return [seqs[i].tolist() for i in best.tolist()], scores[best].tolist()
+
+
+@torch.no_grad()
+def beam_search(model, image: torch.Tensor, vocab, beam_size: int = 3, max_length: int = 30,
+                length_penalty: float = 0.7, device="cpu", backbone_features=None
+                ) -> Tuple[List[int], float]:
+    """Beam search for ONE image."""
+    ids, scores = beam_search_batch(model, image[:1] if image is not None else None, vocab,
+                                    beam_size, max_length, length_penalty, device,
+                                    backbone_features[:1] if backbone_features is not None else None)
+    return ids[0], scores[0]
 
 
 def ids_to_words(ids, vocab, keep_special: bool = False) -> List[str]:
