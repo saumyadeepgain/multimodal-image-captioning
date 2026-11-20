@@ -23,7 +23,7 @@ import os
 import random
 import re
 from collections import Counter, defaultdict
-from typing import Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 import torch
 import torchvision.transforms as T
@@ -163,7 +163,10 @@ def split_by_image(pairs: List[Tuple[str, str]], val_frac: float = 0.1,
 # --------------------------------------------------------------------------- #
 # Transforms
 # --------------------------------------------------------------------------- #
-def get_transforms(train: bool, image_size: int = 224):
+def get_transforms(train: bool, image_size: int = 224) -> T.Compose:
+    """ImageNet-normalised transforms. Normalisation uses the fixed ImageNet
+    statistics the backbone was trained with -- nothing is fitted on data, so
+    there is no preprocessing leakage between splits."""
     normalize = T.Normalize(IMAGENET_MEAN, IMAGENET_STD)
     if train:
         # Mild augmentation: no horizontal flip, because captions such as
@@ -206,7 +209,7 @@ class CaptionDataset(Dataset):
             return Image.new("RGB", (224, 224))
         return Image.open(path).convert("RGB")
 
-    def __getitem__(self, index: int):
+    def __getitem__(self, index: int) -> Tuple[torch.Tensor, torch.Tensor]:
         img = self.load_image(self.imgs[index])
         if self.transform is not None:
             img = self.transform(img)
@@ -234,7 +237,7 @@ class ImageDataset(Dataset):
     def __len__(self) -> int:
         return len(self.images)
 
-    def __getitem__(self, index: int):
+    def __getitem__(self, index: int) -> Tuple[torch.Tensor, int]:
         path = os.path.join(self.img_dir, self.images[index])
         if os.path.exists(path):
             img = Image.open(path).convert("RGB")
@@ -264,7 +267,7 @@ class CachedFeatureDataset(Dataset):
     def __len__(self) -> int:
         return len(self.rows)
 
-    def __getitem__(self, index: int):
+    def __getitem__(self, index: int) -> Tuple[torch.Tensor, torch.Tensor]:
         return self.features[self.rows[index]], self.encoded[index]
 
 
@@ -274,7 +277,8 @@ class MyCollate:
     def __init__(self, pad_idx: int):
         self.pad_idx = pad_idx
 
-    def __call__(self, batch):
+    def __call__(self, batch: List[Tuple[torch.Tensor, torch.Tensor]]
+                 ) -> Tuple[torch.Tensor, torch.Tensor]:
         imgs = torch.stack([item[0] for item in batch])
         targets = torch.nn.utils.rnn.pad_sequence(
             [item[1] for item in batch], batch_first=True, padding_value=self.pad_idx)
@@ -309,8 +313,22 @@ def build_datasets(img_dir: str, captions_file: str, freq_threshold: int = 5,
     return datasets, vocab
 
 
-def make_loader(dataset, batch_size: int, shuffle: bool, num_workers: int, pad_idx: int,
-                collate=True):
+def _seed_worker(worker_id: int) -> None:
+    """Reproducible per-worker NumPy / ``random`` seeds (torch seeds itself)."""
+    import numpy as np
+    worker_seed = torch.initial_seed() % 2 ** 32
+    np.random.seed(worker_seed)
+    random.seed(worker_seed)
+
+
+def make_loader(dataset: Dataset, batch_size: int, shuffle: bool, num_workers: int,
+                pad_idx: int, collate: bool = True, seed: Optional[int] = None) -> DataLoader:
+    """DataLoader with padding collate, pinned memory on CUDA, persistent workers,
+    seeded workers and (if ``seed`` is given) a reproducible shuffle order."""
+    generator = None
+    if seed is not None:
+        generator = torch.Generator()
+        generator.manual_seed(seed)
     return DataLoader(
         dataset,
         batch_size=batch_size,
@@ -319,11 +337,22 @@ def make_loader(dataset, batch_size: int, shuffle: bool, num_workers: int, pad_i
         pin_memory=torch.cuda.is_available(),
         persistent_workers=num_workers > 0,
         collate_fn=MyCollate(pad_idx) if collate else None,
+        worker_init_fn=_seed_worker,
+        generator=generator,
     )
 
 
-def get_data_loaders(img_dir, captions_file, transform=None, batch_size=32, num_workers=2,
-                     **kwargs):
+def build_datasets_from_config(data_cfg: Any, seed: int, augment: bool
+                               ) -> Tuple[Dict[str, Dataset], Vocabulary]:
+    """``build_datasets`` driven by a ``config.DataConfig``."""
+    return build_datasets(data_cfg.img_dir, data_cfg.captions_file,
+                          freq_threshold=data_cfg.freq_threshold, max_len=data_cfg.max_len,
+                          val_frac=data_cfg.val_frac, test_frac=data_cfg.test_frac, seed=seed,
+                          augment=augment, image_size=data_cfg.image_size)
+
+
+def get_data_loaders(img_dir: str, captions_file: str, transform=None, batch_size: int = 32,
+                     num_workers: int = 2, **kwargs):
     """Backwards compatible helper: returns train/val/test loaders and vocab.
 
     If ``transform`` is given it is used for every split (old behaviour);

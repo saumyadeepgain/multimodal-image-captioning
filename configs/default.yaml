@@ -1,0 +1,48 @@
+# Default experiment configuration. Override any value from the CLI, e.g.
+#   python -m src.train --config configs/default.yaml --set train.lr=1e-4 model.num_layers=4
+
+data:
+  img_dir: data/archive/Images
+  captions_file: data/archive/captions.txt
+  val_frac: 0.1
+  test_frac: 0.1
+  freq_threshold: 5
+  max_len: 40
+  image_size: 224
+  num_workers: 4
+model:
+  embed_size: 512
+  num_layers: 3
+  nhead: 8
+  dropout: 0.1
+  max_seq_length: 64
+  tie_weights: false
+  train_CNN: false
+  pretrained: true
+train:
+  epochs: 20
+  batch_size: 64
+  grad_accum_steps: 1
+  lr: 0.0003
+  encoder_lr_mult: 0.1
+  weight_decay: 0.01
+  label_smoothing: 0.1
+  warmup_ratio: 0.05
+  max_grad_norm: 1.0
+  amp: true
+  cache_features: true
+  augment: true
+  patience: 5
+  select_metric: BLEU-4
+  bleu_limit: 0
+  out_dir: checkpoints
+  resume: null
+  stop_after_epochs: null
+eval:
+  beam_size: 3
+  max_length: 30
+  length_penalty: 0.7
+  batch_size: 64
+  meteor: false
+seed: 42
+deterministic: false
