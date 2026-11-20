@@ -1,0 +1,24 @@
+# Keep the build context small: data and checkpoints are mounted at run time.
+.git
+.github
+.venv
+venv
+env
+data
+checkpoints
+runs
+outputs
+wandb
+notebooks
+docs
+tests
+**/__pycache__
+**/*.py[cod]
+*.egg-info
+.pytest_cache
+.ruff_cache
+.mypy_cache
+.coverage
+coverage.xml
+pytest-report.xml
+*.log

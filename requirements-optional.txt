@@ -1,0 +1,9 @@
+# Optional features, pinned (install on top of requirements.txt).
+-r requirements.txt
+gradio==6.32.0         # app.py web demo
+tensorboard==2.21.0    # tracking.backend: tensorboard
+wandb==0.31.1          # tracking.backend: wandb
+pycocoevalcap==1.2     # METEOR (also needs Java)
+pandas==3.0.5          # notebook EDA
+seaborn==0.13.2        # notebook plots
+wordcloud==1.9.6       # notebook word cloud

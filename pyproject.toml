@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "multimodal-image-captioning"
-version = "0.5.0"
+version = "1.0.0"
 description = "Image captioning with a ResNet-50 encoder and a Transformer decoder (Flickr8k)"
 readme = "README.md"
 requires-python = ">=3.9"

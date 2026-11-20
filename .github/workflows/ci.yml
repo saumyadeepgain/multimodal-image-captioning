@@ -70,3 +70,17 @@ jobs:
             coverage.xml
             pytest-report.xml
           if-no-files-found: ignore
+
+  docker:
+    name: Docker image
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build CPU image (also resolves the pinned requirements on Python 3.12)
+        run: docker build -t image-captioning:ci .
+      - name: Smoke-test the CLIs inside the image
+        run: |
+          docker run --rm image-captioning:ci python -m src.train --help > /dev/null
+          docker run --rm image-captioning:ci python -m src.evaluate --help > /dev/null
+          docker run --rm image-captioning:ci python -m src.predict --help > /dev/null

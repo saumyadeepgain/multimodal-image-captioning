@@ -1,72 +1,69 @@
-# Python
+# ---------------------------------------------------------------- Python
 __pycache__/
 *.py[cod]
-*.pyo
-*.pyd
+*.so
 .Python
+build/
+dist/
 *.egg
 *.egg-info/
-dist/
-build/
-*.spec
+.eggs/
+pip-wheel-metadata/
 
-# Virtual environment
+# ---------------------------------------------------------------- environments
+.venv/
 venv/
 env/
-.venv/
+.python-version
+.env
+.env.*
 
-# Jupyter
+# ---------------------------------------------------------------- tooling caches
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+pytest-report.xml
+
+# ---------------------------------------------------------------- notebooks
 .ipynb_checkpoints/
 *.nbconvert.ipynb
 
-# Data (large files — download separately)
+# ---------------------------------------------------------------- data (download separately)
 data/
 
-# Model checkpoints (large)
-checkpoints/*.pt
-checkpoints/*.pth
-checkpoints/*.json
-checkpoints/*.png
-.pytest_cache/
-*.ckpt
-*.safetensors
-*.onnx
-checkpoints/*.yaml
-checkpoints/*.log
-checkpoints/*.tmp
-
-# Experiment tracking / outputs
+# ---------------------------------------------------------------- training outputs
+checkpoints/
 runs/
 outputs/
 wandb/
 mlruns/
 lightning_logs/
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+*.onnx
 *.npy
 *.npz
-
-# Tooling caches
-.mypy_cache/
-.ruff_cache/
-.coverage
-coverage.xml
-pytest-report.xml
-htmlcov/
-.idea/
-
-# Logs
 *.log
-fix*.py
-fix_debug.txt
-rebuild_notebook.py
-inject_notebook.py
 
-# OS
+# ---------------------------------------------------------------- generated files
+docs/_*.png
+captions.csv
+captions.json
+eval_results.json
+
+# ---------------------------------------------------------------- OS / editors
 .DS_Store
 Thumbs.db
-
-# VS Code
 .vscode/
+.idea/
+*.swp
 
-# Distribution
+# ---------------------------------------------------------------- archives
 *.tar.gz
 *.zip
