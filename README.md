@@ -19,8 +19,9 @@
 - **ResNet-50** (ImageNet weights) → 7×7×2048 spatial feature map → 49 region vectors
 - **Learned spatial position embeddings** so the decoder knows *where* each region is
 - **Pre-LN Transformer decoder** (causal self-attention + cross-attention over the 49 regions)
-- **Greedy (batched) and beam-search decoding**, both returning attention maps
-- **Corpus BLEU-1…4** against all 5 references (+ CIDEr / ROUGE-L / METEOR via `pycocoevalcap`)
+- **KV-cached decoding**: batched greedy and batched beam search, both returning attention maps
+- **Corpus BLEU-1…4, CIDEr-D, ROUGE-L** against all 5 references (built in, verified against
+  `pycocoevalcap`); optional METEOR
 - Dataset: **Flickr8k** (8,091 images × 5 captions), split **by image** 80 / 10 / 10
 
 > Reference: Xu et al., *Show, Attend and Tell* (2015) — [arXiv:1502.03044](https://arxiv.org/abs/1502.03044)
@@ -46,7 +47,7 @@ Caption ids ─► Embedding×√d + sinusoidal PE                │
               │ LN → FFN (GELU)                                     │
               └─────────────────────────────────────────────────────┘
    ▼
-LayerNorm → Linear (weights tied to embedding) → next-token logits
+LayerNorm → Linear → next-token logits
 ```
 
 ---
@@ -87,8 +88,14 @@ and `checkpoints/history.json` (loss, perplexity, BLEU-4, LR, grad-norm, epoch t
 python -m src.evaluate --split test --beam 3
 ```
 
-Writes `checkpoints/eval_results.json` with corpus BLEU-1…4 (+ CIDEr / ROUGE-L / METEOR when
-`pycocoevalcap` is installed) and sample predictions.
+Writes `checkpoints/eval_results.json` with corpus BLEU-1…4, CIDEr-D, ROUGE-L, latency per
+image and sample predictions. Add `--meteor` for METEOR (needs `pycocoevalcap` and Java).
+
+### Caption your own images
+
+```bash
+python -m src.predict photo1.jpg photo2.jpg --beam 3 --attention-out attention.png
+```
 
 ### Demo app
 
@@ -110,7 +117,7 @@ pip install -r requirements-dev.txt
 pytest -q
 ```
 
-The tests run on CPU in a few seconds with a random-init backbone and a synthetic dataset, and are
+The 15 tests run on CPU in a few seconds with a random-init backbone and a synthetic dataset, and are
 run by GitHub Actions on every push.
 
 ---
@@ -129,12 +136,29 @@ d=256, 3 layers, vocab 3k, 20-token captions. Script: see `docs/IMPROVEMENTS.pdf
 
 | Operation | Old | New | Speed-up |
 |---|---|---|---|
-| Training step, raw images | 858 ms | 769 ms | 1.1× |
-| Training step, cached CNN features (new) | — | 74 ms | **11.6×** |
-| Greedy decoding, 16 images | 1,656 ms | 876 ms | 1.9× |
-| Beam search k=3, 1 image | 214 ms | 135 ms | 1.6× |
-| Beam search k=5, 1 image | 355 ms | 154 ms | 2.3× |
+| Training step, raw images | 833 ms | 673 ms | 1.2× |
+| Training step, cached CNN features (new) | — | 77 ms | **10.8×** |
+| Greedy decoding, 16 images | 1,744 ms | 722 ms | 2.4× |
+| Beam search k=3, 1 image | 222 ms | 89 ms | 2.5× |
+| Beam search k=5, 1 image | 343 ms | 85 ms | 4.0× |
 | Tokenise 40k captions | crashes on NLTK ≥ 3.9 (`punkt_tab`) | 98 ms | — |
+
+KV-cache (d=512, 3 layers, 16 images × 30 tokens, identical output): full-prefix greedy
+**1,029 ms → 208 ms (4.9×)**; batched beam search k=3 for all 16 images: 373 ms.
+Scripts: `docs/benchmark_old_vs_new.py`, `docs/benchmark_kv_cache.py`.
+
+**Ablations (synthetic task, 3 seeds, `docs/ablation.py`)** — validation cross-entropy, lower is better:
+
+| Variant | Initial loss (log V = 2.94) | Val loss | Token acc. |
+|---|---|---|---|
+| Untied output layer (**default**) | 3.06 | **0.256** | 0.878 |
+| Tied weights, no output scaling | 8.03 | 0.358 | 0.847 |
+| Tied weights + T5 output scaling | 2.99 | 0.554 | 0.794 |
+| Untied, no spatial position embedding | 3.06 | 0.257 | 0.878 |
+| Untied, label smoothing 0.1 | 3.07 | 0.330* | 0.877 |
+
+\* label smoothing raises plain cross-entropy by design; token accuracy is unchanged. The
+position embedding showed no measurable effect on this task — reported as is.
 
 ---
 
@@ -146,8 +170,10 @@ d=256, 3 layers, vocab 3k, 20-token captions. Script: see `docs/IMPROVEMENTS.pdf
 │   ├── dataset.py        # caption parsing, leak-free split, Vocabulary, datasets, transforms
 │   ├── model.py          # EncoderCNN, Pre-LN Transformer decoder, ImageCaptioningModel
 │   ├── train.py          # CLI training: feature cache, AdamW, warm-up+cosine, AMP, early stop
-│   ├── inference.py      # batched greedy decoding, vectorised beam search
-│   ├── evaluate.py       # corpus BLEU (+ CIDEr/ROUGE-L/METEOR), CLI
+│   ├── inference.py      # KV-cached batched greedy and beam search
+│   ├── evaluate.py       # corpus evaluation CLI
+│   ├── metrics.py        # dependency-free CIDEr-D and ROUGE-L
+│   ├── predict.py        # caption image files from the command line
 │   ├── checkpoint.py     # self-contained checkpoints (weights + config + vocab)
 │   └── attention_viz.py  # attention overlays + attention entropy
 ├── tests/                # pytest suite (CPU, synthetic data)
@@ -167,7 +193,9 @@ d=256, 3 layers, vocab 3k, 20-token captions. Script: see `docs/IMPROVEMENTS.pdf
 | Frozen ResNet-50 + feature cache | ImageNet features are strong; caching makes each epoch ~10× cheaper |
 | BatchNorm kept in eval mode when frozen | `requires_grad=False` alone still lets BN running stats drift |
 | 49 region vectors + 2-D position embedding | Spatial attention; attention alone is order-blind |
-| Pre-LN decoder, GELU, weight tying | Stable training, fewer parameters, better perplexity on small data |
+| Pre-LN decoder, GELU, scaled embedding init | Stable training; initial loss ≈ log V |
+| Untied output layer | Beat weight tying in a controlled ablation (see Results) |
+| KV-cache decoding | O(T) generation instead of O(T²), identical output |
 | AdamW + warm-up + cosine, label smoothing 0.1 | Standard Transformer recipe; less over-confident captions |
 | Select checkpoint on val BLEU-4 | Loss and caption quality are only loosely correlated |
 | Split by image, vocab from train only | No leakage between splits |
@@ -176,7 +204,6 @@ d=256, 3 layers, vocab 3k, 20-token captions. Script: see `docs/IMPROVEMENTS.pdf
 
 ## 🔮 Future work
 
-- [ ] KV-cache in the decoder (O(T) instead of O(T²) per generated caption)
 - [ ] Self-critical sequence training (optimise CIDEr directly)
 - [ ] CLIP / ViT encoder; MS-COCO scale training
 - [ ] Sub-word (BPE) vocabulary

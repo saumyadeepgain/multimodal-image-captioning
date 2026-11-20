@@ -1,0 +1,6 @@
+{
+ "same_output": true,
+ "greedy16_full_prefix_ms": 1029.236553666692,
+ "greedy16_kv_cache_ms": 207.99766099999792,
+ "beam3_16img_batched_ms": 373.46365650000735
+}

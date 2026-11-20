@@ -138,11 +138,11 @@ def build():
                         "cheaper via CNN feature caching; beam search up to "
                         f"{BENCH['beam5_ms_old'] / BENCH['beam5_ms_new']:.1f}x faster; batched greedy "
                         f"{BENCH['greedy_16img_ms_old'] / BENCH['greedy_16img_ms_new']:.1f}x faster"],
-        ["Model quality", "Spatial position embeddings, Pre-LN, padding mask, weight tying, label "
+        ["Model quality", "Pre-LN, padding mask, scaled init, KV-cache decoding, label "
                           "smoothing, AdamW + warm-up/cosine, model selection on BLEU-4"],
         ["Honesty of results", "Mock numbers removed from README; notebook mock charts labelled; "
                                "real evaluation script (corpus BLEU vs all 5 references) added"],
-        ["Engineering", "CLI for train/evaluate, self-contained checkpoints, 9 unit tests, CI workflow"],
+        ["Engineering", "CLI for train/evaluate/predict, built-in CIDEr-D/ROUGE-L, self-contained checkpoints, 15 unit tests, CI"],
     ], [3.5 * cm, 13.5 * cm]))
     s.append(PageBreak())
 
@@ -254,14 +254,15 @@ def build():
         "PyTorch's fused attention kernels. Post-LN needs careful warm-up to train stably.",
         "Pre-LN layers + final LayerNorm, GELU, FFN width 4d, a cached boolean causal mask, a key "
         "padding mask, attention weights only from the last layer and only when asked "
-        "(<font face='Courier'>need_weights</font>), embedding dropout, <b>weight tying</b> between "
-        "embedding and output layer, and generation length clamped to the table size.",
+        "(<font face='Courier'>need_weights</font>), embedding dropout, scaled embedding init "
+        "N(0, d<super>-0.5</super>), a <b>KV-cache</b> for generation, and generation length clamped "
+        "to the table size. Weight tying is optional and off by default (see Section 8).",
         f"Fewer trainable parameters ({BENCH['trainable_params_new']/1e6:.1f}M vs "
         f"{BENCH['trainable_params_old']/1e6:.1f}M in the benchmark config) with more capacity where it "
         "matters, faster training step, no crash, mathematically identical logits with or without "
         "padding (unit-tested).",
         "Post-LN can reach slightly better final quality when tuned well; with a 3-layer decoder the "
-        "difference is small. Weight tying assumes embedding size == model size (true here)."))
+        "difference is small. Weight tying would save V x d parameters, but lost in our ablation."))
     s.append(step(6, "Training loop",
         "Teacher forcing: input <font face='Courier'>&lt;start&gt; w1..wn</font>, target "
         "<font face='Courier'>w1..wn &lt;end&gt;</font>, cross-entropy ignoring padding.",
@@ -294,16 +295,16 @@ def build():
         "Scoring against a single reference under-estimates quality and is not comparable with "
         "published numbers (which use corpus BLEU over all 5 references). Every metric in the README "
         "and notebook was placeholder (mock) data.",
-        "<font face='Courier'>greedy_decode</font> decodes a whole batch and stops when all sequences "
-        "finish. <font face='Courier'>beam_search</font> evaluates all beams as one batch, uses the GNMT "
-        "length penalty, and can return attention for the chosen beam. "
-        "<font face='Courier'>src/evaluate.py</font> computes corpus BLEU-1..4 against all references "
-        "(+ CIDEr/ROUGE-L/METEOR via pycocoevalcap), latency per image, and saves sample predictions.",
+        "<font face='Courier'>greedy_decode</font> decodes a whole batch with a KV-cache and stops when all "
+        "sequences finish. <font face='Courier'>beam_search_batch</font> runs all images x beams as one "
+        "batch with a re-ordered KV-cache, the GNMT length penalty, and optional attention for the chosen "
+        "beam. <font face='Courier'>src/evaluate.py</font> computes corpus BLEU-1..4, CIDEr-D and ROUGE-L "
+        "(built in) against all references, optional METEOR, latency per image, and sample predictions.",
         f"Greedy {BENCH['greedy_16img_ms_old']/BENCH['greedy_16img_ms_new']:.1f}x, beam-3 "
         f"{BENCH['beam3_ms_old']/BENCH['beam3_ms_new']:.1f}x, beam-5 "
         f"{BENCH['beam5_ms_old']/BENCH['beam5_ms_new']:.1f}x faster; numbers comparable to the literature.",
-        "Both versions recompute the full prefix each step (O(T<super>2</super>)); a KV-cache would "
-        "be the next speed-up. Beam search still handles one image at a time."))
+        "The KV-cache path re-implements attention with the same weights; a unit test checks it "
+        "matches the full forward pass, but it is extra code to maintain."))
     s.append(step(8, "Visualisation, checkpoints and demo app",
         "Shows the cross-attention map of every word over the image, and serves the model in a "
         "Gradio app.",
@@ -380,8 +381,8 @@ def build():
         "when the CNN is fine-tuned; with a frozen CNN the 10x speed-up usually wins.",
         "<b>NLTK tokenizer</b> is linguistically nicer; the regex one is chosen for robustness and "
         "speed on Flickr8k's simple, lower-case captions.",
-        "<b>Same results expected on old checkpoints?</b> No - layer layout changed (Pre-LN, tied "
-        "weights, position embedding), so old <font face='Courier'>best_model.pth</font> files must "
+        "<b>Same results expected on old checkpoints?</b> No - layer layout changed (Pre-LN, "
+        "position embedding), so old <font face='Courier'>best_model.pth</font> files must "
         "be retrained. <font face='Courier'>load_checkpoint</font> says so explicitly.",
     ])
 
@@ -392,7 +393,8 @@ def build():
         "python -m src.train --epochs 20            # -> checkpoints/best_model.pth, history.json\n"
         "python -m src.evaluate --split test --beam 3  # -> checkpoints/eval_results.json\n"
         "python app.py                              # Gradio demo\n"
-        "pytest -q                                  # 9 tests, CPU, synthetic data\n"
+        "python -m src.predict img.jpg --beam 3     # caption your own images\n"
+        "pytest -q                                  # 15 tests, CPU, synthetic data\n"
         "python docs/build_report.py                # rebuild this PDF", CODE))
 
     s.append(P("7. Change log (commit order)", H1))
@@ -406,7 +408,55 @@ def build():
         ["6", "Tests, CI, requirements, .gitignore"],
         ["7", "Notebook fixes and honest labelling of mock data"],
         ["8", "README rewrite, benchmark script, this report"],
+        ["9", "Round 2: fix tied-weight initialisation (found by a new test), untied output by default"],
+        ["10", "Round 2: KV-cache decoding, batched beam search across images"],
+        ["11", "Round 2: built-in CIDEr-D / ROUGE-L, METEOR opt-in, predict CLI, ablation + benchmarks"],
     ], [1.6 * cm, 15.4 * cm]))
+
+    # ------------------------------------------------------------------ round 2
+    s.append(PageBreak())
+    s.append(P("8. Round 2: measuring before trusting", H1))
+    s.append(P("The second round applied the same old-vs-new scrutiny to the first round's own changes. "
+               "Every claim was put to a controlled test; two did not survive and are reported as such."))
+    s.append(P("8.1 A bug introduced in round 1, and how it was caught", H2))
+    s.append(P("Round 1 tied the embedding and output weights. A new end-to-end check showed a training "
+               "loss of ~8.3 on a 14-word vocabulary, where random guessing gives log 14 = 2.6. Cause: "
+               "the default N(0, 1) embedding makes initial logits huge, and with tying each position's "
+               "own embedding (still in the residual stream) produces a logit of ~sqrt(d) for 'repeat the "
+               "current word'. Fix: scaled init N(0, d<super>-0.5</super>) and, when tying, T5-style output "
+               "scaling. A regression test now asserts that an untrained model's loss is close to log V."))
+    s.append(P("8.2 Controlled ablation", H2))
+    s.append(P("A synthetic task where the caption is fully determined by the image (block colour, "
+               "position and background), 3 seeds, 15 epochs, d=128, 2 layers "
+               "(<font face='Courier'>docs/ablation.py</font>). Validation cross-entropy, lower is better:"))
+    A = json.load(open(os.path.join(HERE, "ablation_results.json")))
+    s.append(table([["Variant", "Initial loss", "Val loss", "Token acc."]] +
+                   [[k, f"{v['init_loss']:.2f}", f"{v['val_loss']:.3f}", f"{v['token_acc']:.3f}"]
+                    for k, v in A.items()], [8.5 * cm, 2.8 * cm, 2.8 * cm, 2.9 * cm]))
+    s.append(Spacer(1, 4))
+    s += bullets([
+        "<b>Weight tying lost</b> (0.358 / 0.554 vs 0.256), so the output layer is now untied by "
+        "default; tying stays available via <font face='Courier'>--tie-weights</font>.",
+        "<b>Spatial position embedding: no measurable effect</b> (0.257 vs 0.256). ResNet features "
+        "already encode position through zero padding. It is kept because it costs only 49 x d "
+        "parameters, but it is no longer claimed as an improvement.",
+        "<b>Label smoothing</b> leaves token accuracy unchanged; its cross-entropy is higher by "
+        "construction. Its benefit, if any, must be judged on BLEU/CIDEr on real data.",
+    ])
+    s.append(P("8.3 KV-cache and batched beam search", H2))
+    K = json.load(open(os.path.join(HERE, "benchmark_kv_cache.json")))
+    s.append(P(f"Generating 30 tokens for 16 images (d=512, 3 layers): full-prefix greedy "
+               f"{K['greedy16_full_prefix_ms']:.0f} ms vs KV-cache {K['greedy16_kv_cache_ms']:.0f} ms "
+               f"(<b>{K['greedy16_full_prefix_ms'] / K['greedy16_kv_cache_ms']:.1f}x</b>), identical output "
+               f"({K['same_output']}). Beam search k=3 for all 16 images in one batch: "
+               f"{K['beam3_16img_batched_ms']:.0f} ms. Image keys/values for cross-attention are projected "
+               "once per caption instead of once per step."))
+    s.append(P("8.4 Metrics without heavy dependencies", H2))
+    s.append(P("CIDEr-D and ROUGE-L are now implemented in <font face='Courier'>src/metrics.py</font> and "
+               "unit-tested to match <font face='Courier'>pycocoevalcap</font> to 6 significant digits, per "
+               "image. METEOR (which starts a Java process and made the tests ~5x slower) is opt-in via "
+               "<font face='Courier'>--meteor</font>. A <font face='Courier'>python -m src.predict</font> "
+               "command captions arbitrary image files and can save the attention figure."))
 
     doc = SimpleDocTemplate(OUT, pagesize=A4, leftMargin=2 * cm, rightMargin=2 * cm,
                             topMargin=1.8 * cm, bottomMargin=1.8 * cm,
