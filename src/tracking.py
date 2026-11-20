@@ -16,7 +16,7 @@ from __future__ import annotations
 import logging
 import os
 import re
-from typing import Any, Dict, Optional
+from typing import Any, Optional
 
 from .config import TrackingConfig
 
@@ -24,8 +24,14 @@ from .config import TrackingConfig
 class ExperimentTracker:
     """Thin facade over TensorBoard ``SummaryWriter`` / ``wandb``."""
 
-    def __init__(self, tracking_cfg: TrackingConfig, run_config: Dict[str, Any], out_dir: str,
-                 logger: Optional[logging.Logger] = None, run_name: Optional[str] = None):
+    def __init__(
+        self,
+        tracking_cfg: TrackingConfig,
+        run_config: dict[str, Any],
+        out_dir: str,
+        logger: Optional[logging.Logger] = None,
+        run_name: Optional[str] = None,
+    ):
         self.cfg = tracking_cfg
         self.logger = logger or logging.getLogger("captioning")
         self.backend = "none"
@@ -42,28 +48,40 @@ class ExperimentTracker:
         try:
             from torch.utils.tensorboard import SummaryWriter
         except ImportError:
-            self.logger.warning("tracking.backend=tensorboard but the 'tensorboard' package is "
-                                "not installed (pip install tensorboard); tracking disabled.")
+            self.logger.warning(
+                "tracking.backend=tensorboard but the 'tensorboard' package is "
+                "not installed (pip install tensorboard); tracking disabled."
+            )
             return
         self._writer = SummaryWriter(log_dir=log_dir)
         self.backend = "tensorboard"
-        self.logger.info(f"TensorBoard logging to {log_dir}  (tensorboard --logdir "
-                         f"{os.path.dirname(log_dir)})")
+        self.logger.info(
+            f"TensorBoard logging to {log_dir}  (tensorboard --logdir {os.path.dirname(log_dir)})"
+        )
 
-    def _start_wandb(self, run_config: Dict[str, Any], out_dir: str, name: Optional[str]) -> None:
+    def _start_wandb(self, run_config: dict[str, Any], out_dir: str, name: Optional[str]) -> None:
         try:
             import wandb
         except ImportError:
-            self.logger.warning("tracking.backend=wandb but the 'wandb' package is not installed "
-                                "(pip install wandb); tracking disabled.")
+            self.logger.warning(
+                "tracking.backend=wandb but the 'wandb' package is not installed "
+                "(pip install wandb); tracking disabled."
+            )
             return
         try:
             # A stable id derived from the run name lets a resumed training run
             # continue the same W&B run (resume="allow").
             run_id = re.sub(r"[^A-Za-z0-9_-]", "-", name) if name else None
-            self._wandb = wandb.init(project=self.cfg.project, name=name, id=run_id,
-                                     resume="allow", config=run_config, dir=out_dir,
-                                     mode=self.cfg.wandb_mode, reinit=True)
+            self._wandb = wandb.init(
+                project=self.cfg.project,
+                name=name,
+                id=run_id,
+                resume="allow",
+                config=run_config,
+                dir=out_dir,
+                mode=self.cfg.wandb_mode,
+                reinit=True,
+            )
             self.backend = "wandb"
             self.logger.info(f"W&B run '{self._wandb.name}' ({self.cfg.wandb_mode})")
         except Exception as exc:  # network / auth problems must not stop training
@@ -75,7 +93,7 @@ class ExperimentTracker:
     def enabled(self) -> bool:
         return self.backend != "none"
 
-    def log_metrics(self, metrics: Dict[str, Optional[float]], step: int) -> None:
+    def log_metrics(self, metrics: dict[str, Optional[float]], step: int) -> None:
         """Log scalar metrics; ``None`` values are skipped."""
         clean = {k: float(v) for k, v in metrics.items() if v is not None}
         if not clean or not self.enabled:

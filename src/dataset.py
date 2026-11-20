@@ -29,11 +29,12 @@ import os
 import random
 import re
 from collections import Counter, defaultdict
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from collections.abc import Iterable, Sequence
+from concurrent.futures import ThreadPoolExecutor
+from typing import Any, Optional
 
 import torch
 import torchvision.transforms as T
-from concurrent.futures import ThreadPoolExecutor
 from PIL import Image, UnidentifiedImageError
 from torch.utils.data import DataLoader, Dataset
 
@@ -76,7 +77,7 @@ def check_image(path: str) -> Optional[str]:
         return f"{type(exc).__name__}: {exc}"
 
 
-def tokenize(text: str) -> List[str]:
+def tokenize(text: str) -> list[str]:
     """Lower-case word tokenizer. Punctuation is dropped (it carries no
     information in Flickr8k captions and only inflates the vocabulary)."""
     return _TOKEN_RE.findall(str(text).lower())
@@ -85,8 +86,8 @@ def tokenize(text: str) -> List[str]:
 class Vocabulary:
     def __init__(self, freq_threshold: int = 5):
         self.freq_threshold = freq_threshold
-        self.itos: Dict[int, str] = {i: t for i, t in enumerate(SPECIAL_TOKENS)}
-        self.stoi: Dict[str, int] = {t: i for i, t in enumerate(SPECIAL_TOKENS)}
+        self.itos: dict[int, str] = dict(enumerate(SPECIAL_TOKENS))
+        self.stoi: dict[str, int] = {t: i for i, t in enumerate(SPECIAL_TOKENS)}
 
     # Kept for backwards compatibility with code that called Vocabulary.tokenize
     tokenize = staticmethod(tokenize)
@@ -115,18 +116,18 @@ class Vocabulary:
                 self.stoi[word] = idx
                 self.itos[idx] = word
 
-    def numericalize(self, text: str) -> List[int]:
+    def numericalize(self, text: str) -> list[int]:
         unk = self.stoi[UNK]
         return [self.stoi.get(tok, unk) for tok in tokenize(text)]
 
-    def encode(self, text: str, max_len: Optional[int] = None) -> List[int]:
+    def encode(self, text: str, max_len: Optional[int] = None) -> list[int]:
         """``<start> w1 ... wn <end>``, truncated so the total is <= max_len."""
         ids = self.numericalize(text)
         if max_len is not None:
             ids = ids[: max_len - 2]
         return [self.start_idx] + ids + [self.end_idx]
 
-    def decode(self, ids: Sequence[int], strip_special: bool = True) -> List[str]:
+    def decode(self, ids: Sequence[int], strip_special: bool = True) -> list[str]:
         words = []
         for i in ids:
             i = int(i)
@@ -139,11 +140,13 @@ class Vocabulary:
         return words
 
     def to_dict(self) -> dict:
-        return {"freq_threshold": self.freq_threshold,
-                "itos": [self.itos[i] for i in range(len(self.itos))]}
+        return {
+            "freq_threshold": self.freq_threshold,
+            "itos": [self.itos[i] for i in range(len(self.itos))],
+        }
 
     @classmethod
-    def from_dict(cls, d: dict) -> "Vocabulary":
+    def from_dict(cls, d: dict) -> Vocabulary:
         v = cls(d.get("freq_threshold", 5))
         v.itos = dict(enumerate(d["itos"]))
         v.stoi = {w: i for i, w in v.itos.items()}
@@ -153,7 +156,7 @@ class Vocabulary:
 # --------------------------------------------------------------------------- #
 # Reading and splitting
 # --------------------------------------------------------------------------- #
-def load_captions(captions_file: str) -> List[Tuple[str, str]]:
+def load_captions(captions_file: str) -> list[tuple[str, str]]:
     """Return ``[(image_name, caption), ...]``.
 
     Handles both common Flickr8k layouts:
@@ -164,8 +167,9 @@ def load_captions(captions_file: str) -> List[Tuple[str, str]]:
     if not os.path.isfile(captions_file):
         raise FileNotFoundError(
             f"Captions file not found: {captions_file}. Download Flickr8k "
-            "(https://www.kaggle.com/datasets/adityajn105/flickr8k) and set data.captions_file.")
-    pairs: List[Tuple[str, str]] = []
+            "(https://www.kaggle.com/datasets/adityajn105/flickr8k) and set data.captions_file."
+        )
+    pairs: list[tuple[str, str]] = []
     with open(captions_file, encoding="utf-8", errors="replace") as f:
         for line_no, line in enumerate(f):
             line = line.strip()
@@ -183,34 +187,43 @@ def load_captions(captions_file: str) -> List[Tuple[str, str]]:
             if img.strip() and cap.strip():
                 pairs.append((img.strip(), cap.strip()))
     if not pairs:
-        raise ValueError(f"No (image, caption) pairs could be parsed from {captions_file}; "
-                         "expected 'image,caption' lines or 'img.jpg#0<TAB>caption'.")
+        raise ValueError(
+            f"No (image, caption) pairs could be parsed from {captions_file}; "
+            "expected 'image,caption' lines or 'img.jpg#0<TAB>caption'."
+        )
     return pairs
 
 
-def verify_image_pairs(img_dir: str, pairs: List[Tuple[str, str]], num_threads: int = 16
-                       ) -> List[Tuple[str, str]]:
+def verify_image_pairs(
+    img_dir: str, pairs: list[tuple[str, str]], num_threads: int = 16
+) -> list[tuple[str, str]]:
     """Drop pairs whose image is missing or unreadable; log a summary.
 
     Raises ``FileNotFoundError`` if *no* image is usable (almost always a wrong
     ``data.img_dir``)."""
     images = sorted({img for img, _ in pairs})
     with ThreadPoolExecutor(max_workers=num_threads) as pool:
-        reasons = dict(zip(images, pool.map(lambda i: check_image(os.path.join(img_dir, i)),
-                                            images)))
+        reasons = dict(
+            zip(images, pool.map(lambda i: check_image(os.path.join(img_dir, i)), images))
+        )
     bad = {img: r for img, r in reasons.items() if r is not None}
     if len(bad) == len(images):
-        raise FileNotFoundError(f"None of the {len(images)} images referenced in the captions "
-                                f"file were found/readable in {img_dir}.")
+        raise FileNotFoundError(
+            f"None of the {len(images)} images referenced in the captions "
+            f"file were found/readable in {img_dir}."
+        )
     if bad:
         examples = ", ".join(f"{k} ({v})" for k, v in list(bad.items())[:5])
-        logger.warning(f"Dropping {len(bad)} of {len(images)} images that are missing or "
-                       f"unreadable, e.g. {examples}")
+        logger.warning(
+            f"Dropping {len(bad)} of {len(images)} images that are missing or "
+            f"unreadable, e.g. {examples}"
+        )
     return [(img, cap) for img, cap in pairs if img not in bad]
 
 
-def split_by_image(pairs: List[Tuple[str, str]], val_frac: float = 0.1,
-                   test_frac: float = 0.1, seed: int = 42):
+def split_by_image(
+    pairs: list[tuple[str, str]], val_frac: float = 0.1, test_frac: float = 0.1, seed: int = 42
+):
     """Split caption pairs into train/val/test with no image in two splits."""
     images = sorted({img for img, _ in pairs})
     rng = random.Random(seed)
@@ -218,7 +231,7 @@ def split_by_image(pairs: List[Tuple[str, str]], val_frac: float = 0.1,
     n_val = int(round(len(images) * val_frac))
     n_test = int(round(len(images) * test_frac))
     val_set = set(images[:n_val])
-    test_set = set(images[n_val:n_val + n_test])
+    test_set = set(images[n_val : n_val + n_test])
     splits = {"train": [], "val": [], "test": []}
     for img, cap in pairs:
         key = "val" if img in val_set else "test" if img in test_set else "train"
@@ -237,13 +250,15 @@ def get_transforms(train: bool, image_size: int = 224) -> T.Compose:
     if train:
         # Mild augmentation: no horizontal flip, because captions such as
         # "on the left" would become wrong.
-        return T.Compose([
-            T.Resize((int(image_size * 1.14), int(image_size * 1.14))),
-            T.RandomCrop(image_size),
-            T.ColorJitter(0.2, 0.2, 0.2),
-            T.ToTensor(),
-            normalize,
-        ])
+        return T.Compose(
+            [
+                T.Resize((int(image_size * 1.14), int(image_size * 1.14))),
+                T.RandomCrop(image_size),
+                T.ColorJitter(0.2, 0.2, 0.2),
+                T.ToTensor(),
+                normalize,
+            ]
+        )
     return T.Compose([T.Resize((image_size, image_size)), T.ToTensor(), normalize])
 
 
@@ -253,16 +268,24 @@ def get_transforms(train: bool, image_size: int = 224) -> T.Compose:
 class CaptionDataset(Dataset):
     """One item per (image, caption) pair. Captions are pre-encoded."""
 
-    def __init__(self, img_dir: str, pairs: List[Tuple[str, str]], vocab: Vocabulary,
-                 transform=None, max_len: int = 40, strict: bool = False):
+    def __init__(
+        self,
+        img_dir: str,
+        pairs: list[tuple[str, str]],
+        vocab: Vocabulary,
+        transform=None,
+        max_len: int = 40,
+        strict: bool = False,
+    ):
         self.img_dir = img_dir
         self.vocab = vocab
         self.transform = transform
         self.strict = strict
         self.imgs = [img for img, _ in pairs]
         self.captions = [cap for _, cap in pairs]
-        self.encoded = [torch.tensor(vocab.encode(c, max_len), dtype=torch.long)
-                        for c in self.captions]
+        self.encoded = [
+            torch.tensor(vocab.encode(c, max_len), dtype=torch.long) for c in self.captions
+        ]
 
     def __len__(self) -> int:
         return len(self.imgs)
@@ -271,7 +294,7 @@ class CaptionDataset(Dataset):
         """Open one image; raises on missing / corrupt files."""
         return open_image(os.path.join(self.img_dir, img_id))
 
-    def __getitem__(self, index: int) -> Tuple[torch.Tensor, torch.Tensor]:
+    def __getitem__(self, index: int) -> tuple[torch.Tensor, torch.Tensor]:
         """``(image [3, H, W], caption ids [T])``.
 
         If the image cannot be read, the warning is logged once per file and the
@@ -289,8 +312,10 @@ class CaptionDataset(Dataset):
             if self.transform is not None:
                 img = self.transform(img)
             return img, self.encoded[i]
-        raise RuntimeError(f"{_FALLBACK_TRIES} consecutive unreadable images starting at "
-                           f"index {index} in {self.img_dir}")
+        raise RuntimeError(
+            f"{_FALLBACK_TRIES} consecutive unreadable images starting at "
+            f"index {index} in {self.img_dir}"
+        )
 
 
 class ImageDataset(Dataset):
@@ -300,8 +325,9 @@ class ImageDataset(Dataset):
     pre-computing CNN features once per image instead of once per caption.
     """
 
-    def __init__(self, img_dir: str, pairs: List[Tuple[str, str]], transform=None,
-                 strict: bool = False):
+    def __init__(
+        self, img_dir: str, pairs: list[tuple[str, str]], transform=None, strict: bool = False
+    ):
         refs = defaultdict(list)
         for img, cap in pairs:
             refs[img].append(cap)
@@ -314,7 +340,7 @@ class ImageDataset(Dataset):
     def __len__(self) -> int:
         return len(self.images)
 
-    def __getitem__(self, index: int) -> Tuple[torch.Tensor, int]:
+    def __getitem__(self, index: int) -> tuple[torch.Tensor, int]:
         """``(image [3, H, W], index)``. An unreadable image cannot be swapped
         for another one here (its references would no longer match), so it is
         replaced by a black image and logged once; ``strict=True`` raises."""
@@ -339,8 +365,9 @@ class CachedFeatureDataset(Dataset):
     (5 captions x N epochs). This dataset looks features up instead.
     """
 
-    def __init__(self, features: torch.Tensor, image_index: Dict[str, int],
-                 caption_ds: CaptionDataset):
+    def __init__(
+        self, features: torch.Tensor, image_index: dict[str, int], caption_ds: CaptionDataset
+    ):
         self.features = features
         self.rows = [image_index[i] for i in caption_ds.imgs]
         self.encoded = caption_ds.encoded
@@ -348,7 +375,7 @@ class CachedFeatureDataset(Dataset):
     def __len__(self) -> int:
         return len(self.rows)
 
-    def __getitem__(self, index: int) -> Tuple[torch.Tensor, torch.Tensor]:
+    def __getitem__(self, index: int) -> tuple[torch.Tensor, torch.Tensor]:
         return self.features[self.rows[index]], self.encoded[index]
 
 
@@ -358,11 +385,13 @@ class MyCollate:
     def __init__(self, pad_idx: int):
         self.pad_idx = pad_idx
 
-    def __call__(self, batch: List[Tuple[torch.Tensor, torch.Tensor]]
-                 ) -> Tuple[torch.Tensor, torch.Tensor]:
+    def __call__(
+        self, batch: list[tuple[torch.Tensor, torch.Tensor]]
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         imgs = torch.stack([item[0] for item in batch])
         targets = torch.nn.utils.rnn.pad_sequence(
-            [item[1] for item in batch], batch_first=True, padding_value=self.pad_idx)
+            [item[1] for item in batch], batch_first=True, padding_value=self.pad_idx
+        )
         return imgs, targets
 
 
@@ -370,10 +399,18 @@ class MyCollate:
 Flickr8kDataset = CaptionDataset
 
 
-def build_datasets(img_dir: str, captions_file: str, freq_threshold: int = 5,
-                   max_len: int = 40, val_frac: float = 0.1, test_frac: float = 0.1,
-                   seed: int = 42, augment: bool = True, image_size: int = 224,
-                   verify_images: bool = False):
+def build_datasets(
+    img_dir: str,
+    captions_file: str,
+    freq_threshold: int = 5,
+    max_len: int = 40,
+    val_frac: float = 0.1,
+    test_frac: float = 0.1,
+    seed: int = 42,
+    augment: bool = True,
+    image_size: int = 224,
+    verify_images: bool = False,
+):
     """Read, (optionally) verify, split, build vocab (train only), create datasets.
 
     Returns ``(datasets, vocab)`` with keys ``train``/``val``/``test``
@@ -382,14 +419,17 @@ def build_datasets(img_dir: str, captions_file: str, freq_threshold: int = 5,
     if not os.path.isdir(img_dir):
         raise FileNotFoundError(
             f"Image folder not found: {img_dir}. Download Flickr8k "
-            "(https://www.kaggle.com/datasets/adityajn105/flickr8k) and set data.img_dir.")
+            "(https://www.kaggle.com/datasets/adityajn105/flickr8k) and set data.img_dir."
+        )
     pairs = load_captions(captions_file)
     if verify_images:
         pairs = verify_image_pairs(img_dir, pairs)
     splits = split_by_image(pairs, val_frac, test_frac, seed)
     if not splits["train"]:
-        raise ValueError("The training split is empty; lower data.val_frac / data.test_frac "
-                         "or check the dataset.")
+        raise ValueError(
+            "The training split is empty; lower data.val_frac / data.test_frac "
+            "or check the dataset."
+        )
     vocab = Vocabulary(freq_threshold)
     vocab.build_vocabulary(c for _, c in splits["train"])  # train only: no leakage
 
@@ -409,13 +449,21 @@ def build_datasets(img_dir: str, captions_file: str, freq_threshold: int = 5,
 def _seed_worker(worker_id: int) -> None:
     """Reproducible per-worker NumPy / ``random`` seeds (torch seeds itself)."""
     import numpy as np
-    worker_seed = torch.initial_seed() % 2 ** 32
-    np.random.seed(worker_seed)
+
+    worker_seed = torch.initial_seed() % 2**32
+    np.random.seed(worker_seed)  # noqa: NPY002 - seeds the global RNG used by libraries
     random.seed(worker_seed)
 
 
-def make_loader(dataset: Dataset, batch_size: int, shuffle: bool, num_workers: int,
-                pad_idx: int, collate: bool = True, seed: Optional[int] = None) -> DataLoader:
+def make_loader(
+    dataset: Dataset,
+    batch_size: int,
+    shuffle: bool,
+    num_workers: int,
+    pad_idx: int,
+    collate: bool = True,
+    seed: Optional[int] = None,
+) -> DataLoader:
     """DataLoader with padding collate, pinned memory on CUDA, persistent workers,
     seeded workers and (if ``seed`` is given) a reproducible shuffle order."""
     generator = None
@@ -435,18 +483,32 @@ def make_loader(dataset: Dataset, batch_size: int, shuffle: bool, num_workers: i
     )
 
 
-def build_datasets_from_config(data_cfg: Any, seed: int, augment: bool
-                               ) -> Tuple[Dict[str, Dataset], Vocabulary]:
+def build_datasets_from_config(
+    data_cfg: Any, seed: int, augment: bool
+) -> tuple[dict[str, Dataset], Vocabulary]:
     """``build_datasets`` driven by a ``config.DataConfig``."""
-    return build_datasets(data_cfg.img_dir, data_cfg.captions_file,
-                          freq_threshold=data_cfg.freq_threshold, max_len=data_cfg.max_len,
-                          val_frac=data_cfg.val_frac, test_frac=data_cfg.test_frac, seed=seed,
-                          augment=augment, image_size=data_cfg.image_size,
-                          verify_images=getattr(data_cfg, "verify_images", False))
+    return build_datasets(
+        data_cfg.img_dir,
+        data_cfg.captions_file,
+        freq_threshold=data_cfg.freq_threshold,
+        max_len=data_cfg.max_len,
+        val_frac=data_cfg.val_frac,
+        test_frac=data_cfg.test_frac,
+        seed=seed,
+        augment=augment,
+        image_size=data_cfg.image_size,
+        verify_images=getattr(data_cfg, "verify_images", False),
+    )
 
 
-def get_data_loaders(img_dir: str, captions_file: str, transform=None, batch_size: int = 32,
-                     num_workers: int = 2, **kwargs):
+def get_data_loaders(
+    img_dir: str,
+    captions_file: str,
+    transform=None,
+    batch_size: int = 32,
+    num_workers: int = 2,
+    **kwargs,
+):
     """Backwards compatible helper: returns train/val/test loaders and vocab.
 
     If ``transform`` is given it is used for every split (old behaviour);
@@ -457,7 +519,9 @@ def get_data_loaders(img_dir: str, captions_file: str, transform=None, batch_siz
         for k in ("train", "val", "test"):
             datasets[k].transform = transform
     pad = vocab.pad_idx
-    return (make_loader(datasets["train"], batch_size, True, num_workers, pad),
-            make_loader(datasets["val"], batch_size, False, num_workers, pad),
-            make_loader(datasets["test"], batch_size, False, num_workers, pad),
-            vocab)
+    return (
+        make_loader(datasets["train"], batch_size, True, num_workers, pad),
+        make_loader(datasets["val"], batch_size, False, num_workers, pad),
+        make_loader(datasets["test"], batch_size, False, num_workers, pad),
+        vocab,
+    )

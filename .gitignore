@@ -48,6 +48,8 @@ lightning_logs/
 .mypy_cache/
 .ruff_cache/
 .coverage
+coverage.xml
+pytest-report.xml
 htmlcov/
 .idea/
 

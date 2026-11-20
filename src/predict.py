@@ -20,7 +20,7 @@ if __package__ in (None, ""):  # executed as `python src/predict.py`
 
 import argparse
 import json
-from typing import Any, Dict, List, Optional
+from typing import Any, Optional
 
 import torch
 
@@ -30,8 +30,14 @@ from .model import ImageCaptioningModel
 from .utils import get_device, get_logger, load_checkpoint
 
 
-def caption_images(model: ImageCaptioningModel, vocab: Vocabulary, paths: List[str], beam: int = 3,
-                   max_length: int = 30, device: Any = "cpu") -> List[str]:
+def caption_images(
+    model: ImageCaptioningModel,
+    vocab: Vocabulary,
+    paths: list[str],
+    beam: int = 3,
+    max_length: int = 30,
+    device: Any = "cpu",
+) -> list[str]:
     """Caption image files in one batch (greedy if ``beam <= 1``).
 
     Raises ``OSError`` / ``ValueError`` if any file cannot be read; see
@@ -46,13 +52,19 @@ def caption_images(model: ImageCaptioningModel, vocab: Vocabulary, paths: List[s
     return [" ".join(vocab.decode(s)) for s in ids]
 
 
-def caption_files(model: ImageCaptioningModel, vocab: Vocabulary, paths: List[str],
-                  beam: int = 3, max_length: int = 30, device: Any = "cpu",
-                  batch_size: int = 32) -> Dict[str, Optional[str]]:
+def caption_files(
+    model: ImageCaptioningModel,
+    vocab: Vocabulary,
+    paths: list[str],
+    beam: int = 3,
+    max_length: int = 30,
+    device: Any = "cpu",
+    batch_size: int = 32,
+) -> dict[str, Optional[str]]:
     """Caption many files in batches; unreadable files map to ``None``."""
     log = get_logger()
-    readable: List[str] = []
-    results: Dict[str, Optional[str]] = {}
+    readable: list[str] = []
+    results: dict[str, Optional[str]] = {}
     for p in paths:
         try:
             open_image(p)
@@ -61,13 +73,13 @@ def caption_files(model: ImageCaptioningModel, vocab: Vocabulary, paths: List[st
             log.error(f"Skipping {p}: {type(exc).__name__}: {exc}")
             results[p] = None
     for s in range(0, len(readable), batch_size):
-        chunk = readable[s:s + batch_size]
+        chunk = readable[s : s + batch_size]
         for p, c in zip(chunk, caption_images(model, vocab, chunk, beam, max_length, device)):
             results[p] = c
     return {p: results[p] for p in paths}
 
 
-def main(argv: Optional[List[str]] = None) -> None:
+def main(argv: Optional[list[str]] = None) -> None:
     """CLI entry point."""
     ap = argparse.ArgumentParser(description="Caption images with a trained checkpoint")
     ap.add_argument("images", nargs="+")
@@ -87,8 +99,9 @@ def main(argv: Optional[List[str]] = None) -> None:
     except (FileNotFoundError, ValueError) as exc:
         log.error(str(exc))
         sys.exit(1)
-    caps = caption_files(model, vocab, args.images, args.beam, args.max_length, device,
-                         args.batch_size)
+    caps = caption_files(
+        model, vocab, args.images, args.beam, args.max_length, device, args.batch_size
+    )
     if args.json:
         sys.stdout.write(json.dumps(caps, indent=2) + "\n")
     else:
@@ -98,6 +111,7 @@ def main(argv: Optional[List[str]] = None) -> None:
     if args.attention_out:
         from .attention_viz import plot_attention
         from .inference import generate_caption_beam_search, generate_caption_greedy
+
         first = args.images[0]
         if caps[first] is None:
             log.error(f"Cannot draw attention: {first} is unreadable.")
@@ -105,8 +119,9 @@ def main(argv: Optional[List[str]] = None) -> None:
         img = open_image(first)
         x = get_transforms(train=False)(img).unsqueeze(0)
         if args.beam > 1:
-            words, attn = generate_caption_beam_search(model, x, vocab, args.max_length, args.beam,
-                                                       device, return_attention=True)
+            words, attn = generate_caption_beam_search(
+                model, x, vocab, args.max_length, args.beam, device, return_attention=True
+            )
         else:
             words, attn = generate_caption_greedy(model, x, vocab, args.max_length, device)
         plot_attention(img, words, attn).savefig(args.attention_out, dpi=120, bbox_inches="tight")

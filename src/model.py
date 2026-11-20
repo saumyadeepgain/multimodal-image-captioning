@@ -32,7 +32,7 @@ Changes compared with the first version (details in docs/IMPROVEMENTS.pdf):
 from __future__ import annotations
 
 import math
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Optional
 
 import torch
 import torch.nn as nn
@@ -43,8 +43,14 @@ BACKBONE_DIM = 2048
 
 
 class EncoderCNN(nn.Module):
-    def __init__(self, embed_size: int, train_CNN: bool = False, pretrained: bool = True,
-                 dropout: float = 0.1, grid_size: int = 7):
+    def __init__(
+        self,
+        embed_size: int,
+        train_CNN: bool = False,
+        pretrained: bool = True,
+        dropout: float = 0.1,
+        grid_size: int = 7,
+    ):
         super().__init__()
         weights = models.ResNet50_Weights.DEFAULT if pretrained else None
         resnet = models.resnet50(weights=weights)
@@ -63,7 +69,7 @@ class EncoderCNN(nn.Module):
         self.pos_embed = nn.Parameter(torch.zeros(1, grid_size * grid_size, embed_size))
         nn.init.trunc_normal_(self.pos_embed, std=0.02)
 
-    def train(self, mode: bool = True) -> "EncoderCNN":
+    def train(self, mode: bool = True) -> EncoderCNN:
         """Frozen ResNet stages always stay in eval mode, so their BatchNorm
         running statistics never change. When fine-tuning, only layer4 (child
         "7") is switched to train mode -- the earlier version put the *whole*
@@ -112,13 +118,16 @@ class PositionalEncoding(nn.Module):
 class CustomTransformerDecoderLayer(nn.Module):
     """Pre-LN decoder layer that can return cross-attention weights."""
 
-    def __init__(self, d_model: int, nhead: int, dim_feedforward: int = 2048,
-                 dropout: float = 0.1):
+    def __init__(self, d_model: int, nhead: int, dim_feedforward: int = 2048, dropout: float = 0.1):
         super().__init__()
         self.self_attn = nn.MultiheadAttention(d_model, nhead, dropout=dropout, batch_first=True)
-        self.multihead_attn = nn.MultiheadAttention(d_model, nhead, dropout=dropout, batch_first=True)
+        self.multihead_attn = nn.MultiheadAttention(
+            d_model, nhead, dropout=dropout, batch_first=True
+        )
         self.ff = nn.Sequential(
-            nn.Linear(d_model, dim_feedforward), nn.GELU(), nn.Dropout(dropout),
+            nn.Linear(d_model, dim_feedforward),
+            nn.GELU(),
+            nn.Dropout(dropout),
             nn.Linear(dim_feedforward, d_model),
         )
         self.norm1 = nn.LayerNorm(d_model)
@@ -128,19 +137,25 @@ class CustomTransformerDecoderLayer(nn.Module):
         self.dropout2 = nn.Dropout(dropout)
         self.dropout3 = nn.Dropout(dropout)
 
-    def forward(self, tgt: torch.Tensor, memory: torch.Tensor,
-                tgt_mask: Optional[torch.Tensor] = None,
-                tgt_key_padding_mask: Optional[torch.Tensor] = None,
-                need_weights: bool = False) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+    def forward(
+        self,
+        tgt: torch.Tensor,
+        memory: torch.Tensor,
+        tgt_mask: Optional[torch.Tensor] = None,
+        tgt_key_padding_mask: Optional[torch.Tensor] = None,
+        need_weights: bool = False,
+    ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
         """Full-sequence pass (training / scoring). Returns (output, cross-attn or None)."""
         x = self.norm1(tgt)
-        sa, _ = self.self_attn(x, x, x, attn_mask=tgt_mask,
-                               key_padding_mask=tgt_key_padding_mask, need_weights=False)
+        sa, _ = self.self_attn(
+            x, x, x, attn_mask=tgt_mask, key_padding_mask=tgt_key_padding_mask, need_weights=False
+        )
         tgt = tgt + self.dropout1(sa)
 
         x = self.norm2(tgt)
-        ca, weights = self.multihead_attn(x, memory, memory, need_weights=need_weights,
-                                          average_attn_weights=True)
+        ca, weights = self.multihead_attn(
+            x, memory, memory, need_weights=need_weights, average_attn_weights=True
+        )
         tgt = tgt + self.dropout2(ca)
 
         tgt = tgt + self.dropout3(self.ff(self.norm3(tgt)))
@@ -152,17 +167,18 @@ class CustomTransformerDecoderLayer(nn.Module):
         B, T, E = x.shape
         return x.view(B, T, nhead, E // nhead).transpose(1, 2)  # (B, H, T, Dh)
 
-    def project_memory(self, memory: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    def project_memory(self, memory: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """Cross-attention keys/values for the image, computed once."""
         mha = self.multihead_attn
         E = memory.size(-1)
         w, b = mha.in_proj_weight, mha.in_proj_bias
-        k = F.linear(memory, w[E:2 * E], b[E:2 * E])
-        v = F.linear(memory, w[2 * E:], b[2 * E:])
+        k = F.linear(memory, w[E : 2 * E], b[E : 2 * E])
+        v = F.linear(memory, w[2 * E :], b[2 * E :])
         return self._heads(k, mha.num_heads), self._heads(v, mha.num_heads)
 
-    def step(self, x: torch.Tensor, cache: Dict[str, Optional[torch.Tensor]],
-             need_weights: bool = False) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+    def step(
+        self, x: torch.Tensor, cache: dict[str, Optional[torch.Tensor]], need_weights: bool = False
+    ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
         """One token (B, 1, E) using/extending ``cache`` (eval mode only)."""
         sa_mha, ca_mha = self.self_attn, self.multihead_attn
         H = sa_mha.num_heads
@@ -191,17 +207,29 @@ class CustomTransformerDecoderLayer(nn.Module):
 
 
 class DecoderTransformer(nn.Module):
-    def __init__(self, embed_size: int, vocab_size: int, num_layers: int = 3, nhead: int = 8,
-                 max_seq_length: int = 64, dropout: float = 0.1, dim_feedforward: Optional[int] = None,
-                 pad_idx: int = 0, tie_weights: bool = False):
+    def __init__(
+        self,
+        embed_size: int,
+        vocab_size: int,
+        num_layers: int = 3,
+        nhead: int = 8,
+        max_seq_length: int = 64,
+        dropout: float = 0.1,
+        dim_feedforward: Optional[int] = None,
+        pad_idx: int = 0,
+        tie_weights: bool = False,
+    ):
         super().__init__()
         self.embed = nn.Embedding(vocab_size, embed_size, padding_idx=pad_idx)
         self.pos_encoder = PositionalEncoding(embed_size, max_seq_length)
         self.emb_dropout = nn.Dropout(dropout)
         ff = dim_feedforward or 4 * embed_size
-        self.layers = nn.ModuleList([
-            CustomTransformerDecoderLayer(embed_size, nhead, ff, dropout) for _ in range(num_layers)
-        ])
+        self.layers = nn.ModuleList(
+            [
+                CustomTransformerDecoderLayer(embed_size, nhead, ff, dropout)
+                for _ in range(num_layers)
+            ]
+        )
         self.final_norm = nn.LayerNorm(embed_size)
         self.fc_out = nn.Linear(embed_size, vocab_size)
         if tie_weights:
@@ -209,14 +237,14 @@ class DecoderTransformer(nn.Module):
         # Scaled init: with tied weights the default N(0, 1) embedding makes the
         # initial logits have std ~sqrt(d) (loss far above log|V|). N(0, d^-0.5)
         # gives unit-scale inputs after the sqrt(d) multiplier and sane logits.
-        nn.init.normal_(self.embed.weight, mean=0.0, std=embed_size ** -0.5)
+        nn.init.normal_(self.embed.weight, mean=0.0, std=embed_size**-0.5)
         with torch.no_grad():
             self.embed.weight[pad_idx].zero_()
         nn.init.zeros_(self.fc_out.bias)
         # As in T5: with tied weights, rescale the decoder output by d^-0.5,
         # otherwise each position's own input embedding (still in the residual
         # stream) yields a logit of ~sqrt(d) for "repeat the current word".
-        self.out_scale = embed_size ** -0.5 if tie_weights else 1.0
+        self.out_scale = embed_size**-0.5 if tie_weights else 1.0
         self.max_seq_length = max_seq_length
         self.embed_size = embed_size
         self.pad_idx = pad_idx
@@ -227,8 +255,13 @@ class DecoderTransformer(nn.Module):
         """Boolean mask, True = position may NOT be attended to."""
         return self.causal_mask[:sz, :sz]
 
-    def forward(self, features: torch.Tensor, captions: torch.Tensor, return_attention: bool = False,
-                padding_mask: Optional[torch.Tensor] = None):
+    def forward(
+        self,
+        features: torch.Tensor,
+        captions: torch.Tensor,
+        return_attention: bool = False,
+        padding_mask: Optional[torch.Tensor] = None,
+    ):
         """Teacher-forced decoding. features (B, S, E), captions (B, T) -> logits (B, T, V)
         [, last-layer head-averaged cross-attention (B, T, S)]."""
         # features: (B, 49, E) memory; captions: (B, T) token ids
@@ -241,14 +274,19 @@ class DecoderTransformer(nn.Module):
         attn = None
         for i, layer in enumerate(self.layers):
             last = i == len(self.layers) - 1
-            x, w = layer(x, features, tgt_mask=mask, tgt_key_padding_mask=padding_mask,
-                         need_weights=return_attention and last)
+            x, w = layer(
+                x,
+                features,
+                tgt_mask=mask,
+                tgt_key_padding_mask=padding_mask,
+                need_weights=return_attention and last,
+            )
             if w is not None:
                 attn = w
         out = self.fc_out(self.final_norm(x) * self.out_scale)
         return (out, attn) if return_attention else out
 
-    def init_cache(self, memory: torch.Tensor) -> List[Dict[str, Optional[torch.Tensor]]]:
+    def init_cache(self, memory: torch.Tensor) -> list[dict[str, Optional[torch.Tensor]]]:
         """Per-layer cache with pre-projected image keys/values."""
         caches = []
         for layer in self.layers:
@@ -257,8 +295,9 @@ class DecoderTransformer(nn.Module):
         return caches
 
     @staticmethod
-    def reorder_cache(caches: List[Dict[str, Optional[torch.Tensor]]], index: torch.Tensor
-                      ) -> List[Dict[str, Optional[torch.Tensor]]]:
+    def reorder_cache(
+        caches: list[dict[str, Optional[torch.Tensor]]], index: torch.Tensor
+    ) -> list[dict[str, Optional[torch.Tensor]]]:
         """Select batch rows (used by beam search when beams are re-ranked)."""
         for c in caches:
             for key in ("mk", "mv", "k", "v"):
@@ -266,13 +305,18 @@ class DecoderTransformer(nn.Module):
                     c[key] = c[key].index_select(0, index)
         return caches
 
-    def step(self, tokens: torch.Tensor, position: int,
-             caches: List[Dict[str, Optional[torch.Tensor]]], return_attention: bool = False):
+    def step(
+        self,
+        tokens: torch.Tensor,
+        position: int,
+        caches: list[dict[str, Optional[torch.Tensor]]],
+        return_attention: bool = False,
+    ):
         """Logits for the next token given the last tokens (B,) at ``position``."""
         if position >= self.max_seq_length:
             raise ValueError(f"position {position} exceeds max_len {self.max_seq_length}")
         x = self.embed(tokens[:, None]) * math.sqrt(self.embed_size)
-        x = x + self.pos_encoder.pe[:, position:position + 1]
+        x = x + self.pos_encoder.pe[:, position : position + 1]
         attn = None
         for i, (layer, cache) in enumerate(zip(self.layers, caches)):
             last = i == len(self.layers) - 1
@@ -284,45 +328,84 @@ class DecoderTransformer(nn.Module):
 
 
 class ImageCaptioningModel(nn.Module):
-    def __init__(self, embed_size: int, vocab_size: int, num_layers: int = 3, nhead: int = 8,
-                 train_CNN: bool = False, pretrained: bool = True, dropout: float = 0.1,
-                 max_seq_length: int = 64, pad_idx: int = 0, tie_weights: bool = False):
+    def __init__(
+        self,
+        embed_size: int,
+        vocab_size: int,
+        num_layers: int = 3,
+        nhead: int = 8,
+        train_CNN: bool = False,
+        pretrained: bool = True,
+        dropout: float = 0.1,
+        max_seq_length: int = 64,
+        pad_idx: int = 0,
+        tie_weights: bool = False,
+    ):
         super().__init__()
-        self.config = dict(embed_size=embed_size, vocab_size=vocab_size, num_layers=num_layers,
-                           nhead=nhead, train_CNN=train_CNN, dropout=dropout,
-                           max_seq_length=max_seq_length, pad_idx=pad_idx,
-                           tie_weights=tie_weights)
+        self.config = dict(
+            embed_size=embed_size,
+            vocab_size=vocab_size,
+            num_layers=num_layers,
+            nhead=nhead,
+            train_CNN=train_CNN,
+            dropout=dropout,
+            max_seq_length=max_seq_length,
+            pad_idx=pad_idx,
+            tie_weights=tie_weights,
+        )
         self.encoder = EncoderCNN(embed_size, train_CNN, pretrained=pretrained, dropout=dropout)
-        self.decoder = DecoderTransformer(embed_size, vocab_size, num_layers, nhead,
-                                          max_seq_length=max_seq_length, dropout=dropout,
-                                          pad_idx=pad_idx, tie_weights=tie_weights)
+        self.decoder = DecoderTransformer(
+            embed_size,
+            vocab_size,
+            num_layers,
+            nhead,
+            max_seq_length=max_seq_length,
+            dropout=dropout,
+            pad_idx=pad_idx,
+            tie_weights=tie_weights,
+        )
 
     @classmethod
-    def from_config(cls, model_cfg, vocab_size: int, pad_idx: int) -> "ImageCaptioningModel":
+    def from_config(cls, model_cfg, vocab_size: int, pad_idx: int) -> ImageCaptioningModel:
         """Build from a ``config.ModelConfig``."""
-        return cls(embed_size=model_cfg.embed_size, vocab_size=vocab_size,
-                   num_layers=model_cfg.num_layers, nhead=model_cfg.nhead,
-                   train_CNN=model_cfg.train_CNN, pretrained=model_cfg.pretrained,
-                   dropout=model_cfg.dropout, max_seq_length=model_cfg.max_seq_length,
-                   pad_idx=pad_idx, tie_weights=model_cfg.tie_weights)
+        return cls(
+            embed_size=model_cfg.embed_size,
+            vocab_size=vocab_size,
+            num_layers=model_cfg.num_layers,
+            nhead=model_cfg.nhead,
+            train_CNN=model_cfg.train_CNN,
+            pretrained=model_cfg.pretrained,
+            dropout=model_cfg.dropout,
+            max_seq_length=model_cfg.max_seq_length,
+            pad_idx=pad_idx,
+            tie_weights=model_cfg.tie_weights,
+        )
 
-    def encode(self, images: Optional[torch.Tensor] = None,
-               backbone_features: Optional[torch.Tensor] = None) -> torch.Tensor:
+    def encode(
+        self,
+        images: Optional[torch.Tensor] = None,
+        backbone_features: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
         """Image memory (B, 49, E) from raw images or cached backbone features."""
         if backbone_features is not None:
             return self.encoder.project_features(backbone_features)
         return self.encoder(images)
 
-    def forward(self, images: Optional[torch.Tensor] = None,
-                captions: Optional[torch.Tensor] = None, return_attention: bool = False,
-                backbone_features: Optional[torch.Tensor] = None):
+    def forward(
+        self,
+        images: Optional[torch.Tensor] = None,
+        captions: Optional[torch.Tensor] = None,
+        return_attention: bool = False,
+        backbone_features: Optional[torch.Tensor] = None,
+    ):
         """Teacher forcing: decoder input is ``captions[:, :-1]`` and the
         logits are aligned with targets ``captions[:, 1:]``."""
         memory = self.encode(images, backbone_features)
         return self.decoder(memory, captions[:, :-1], return_attention)
 
-    def param_groups(self, lr: float, weight_decay: float, encoder_lr_mult: float = 0.1
-                     ) -> List[Dict[str, Any]]:
+    def param_groups(
+        self, lr: float, weight_decay: float, encoder_lr_mult: float = 0.1
+    ) -> list[dict[str, Any]]:
         """AdamW groups: no decay on biases/norms/embeddings, lower LR for the CNN."""
         decay, no_decay, cnn = [], [], []
         seen = set()
@@ -336,8 +419,10 @@ class ImageCaptioningModel(nn.Module):
                 no_decay.append(p)
             else:
                 decay.append(p)
-        groups = [{"params": decay, "lr": lr, "weight_decay": weight_decay},
-                  {"params": no_decay, "lr": lr, "weight_decay": 0.0}]
+        groups = [
+            {"params": decay, "lr": lr, "weight_decay": weight_decay},
+            {"params": no_decay, "lr": lr, "weight_decay": 0.0},
+        ]
         if cnn:
             groups.append({"params": cnn, "lr": lr * encoder_lr_mult, "weight_decay": weight_decay})
         return groups

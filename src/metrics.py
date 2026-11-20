@@ -16,18 +16,18 @@ from __future__ import annotations
 
 import math
 from collections import Counter, defaultdict
-from typing import Dict, List, Sequence, Tuple
+from collections.abc import Sequence
 
 
 def _ngrams(words: Sequence[str], n_max: int = 4) -> Counter:
     c = Counter()
     for n in range(1, n_max + 1):
         for i in range(len(words) - n + 1):
-            c[tuple(words[i:i + n])] += 1
+            c[tuple(words[i : i + n])] += 1
     return c
 
 
-def _vec(counts: Counter, df: Dict[tuple, float], log_n_docs: float, n_max: int):
+def _vec(counts: Counter, df: dict[tuple, float], log_n_docs: float, n_max: int):
     vec = [defaultdict(float) for _ in range(n_max)]
     norm = [0.0] * n_max
     length = 0
@@ -48,17 +48,21 @@ def _sim(vh, vr, nh, nr, lh, lr, n_max, sigma):
             out[n] += min(val, vr[n].get(ng, 0.0)) * vr[n].get(ng, 0.0)  # clipped (CIDEr-D)
         if nh[n] != 0 and nr[n] != 0:
             out[n] /= nh[n] * nr[n]
-        out[n] *= math.e ** (-(delta ** 2) / (2 * sigma ** 2))
+        out[n] *= math.e ** (-(delta**2) / (2 * sigma**2))
     return out
 
 
-def cider_d(hypotheses: List[List[str]], references: List[List[List[str]]],
-            n_max: int = 4, sigma: float = 6.0) -> Tuple[float, List[float]]:
+def cider_d(
+    hypotheses: list[list[str]],
+    references: list[list[list[str]]],
+    n_max: int = 4,
+    sigma: float = 6.0,
+) -> tuple[float, list[float]]:
     """Corpus CIDEr-D. Returns ``(mean score, per-image scores)``."""
     ref_counts = [[_ngrams(r, n_max) for r in refs] for refs in references]
-    df: Dict[tuple, float] = defaultdict(float)
+    df: dict[tuple, float] = defaultdict(float)
     for refs in ref_counts:
-        for ng in set(ng for rc in refs for ng in rc):
+        for ng in {ng for rc in refs for ng in rc}:
             df[ng] += 1
     log_n = math.log(float(len(references)))
     scores = []
@@ -83,8 +87,9 @@ def _lcs(a: Sequence[str], b: Sequence[str]) -> int:
     return prev[-1]
 
 
-def rouge_l(hypotheses: List[List[str]], references: List[List[List[str]]],
-            beta: float = 1.2) -> Tuple[float, List[float]]:
+def rouge_l(
+    hypotheses: list[list[str]], references: list[list[list[str]]], beta: float = 1.2
+) -> tuple[float, list[float]]:
     """ROUGE-L F-score as in coco-caption: max precision / recall over refs."""
     scores = []
     for hyp, refs in zip(hypotheses, references):
@@ -94,5 +99,5 @@ def rouge_l(hypotheses: List[List[str]], references: List[List[List[str]]],
             precs.append(lcs / len(hyp) if hyp else 0.0)
             recs.append(lcs / len(r) if r else 0.0)
         p, r = max(precs, default=0.0), max(recs, default=0.0)
-        scores.append(((1 + beta ** 2) * p * r) / (r + beta ** 2 * p) if p and r else 0.0)
+        scores.append(((1 + beta**2) * p * r) / (r + beta**2 * p) if p and r else 0.0)
     return sum(scores) / max(len(scores), 1), scores

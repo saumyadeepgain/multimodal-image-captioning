@@ -9,7 +9,7 @@ now carries its own config and vocabulary.
 
 import argparse
 import os
-from typing import Optional, Tuple
+from typing import Optional
 
 import gradio as gr
 import matplotlib.pyplot as plt
@@ -36,8 +36,9 @@ def load(path: str) -> None:
         STATE["error"] = f"Failed to load {path}: {e}"
 
 
-def predict(image: Optional[Image.Image], decoding: str, beam_size: int
-            ) -> Tuple[str, Optional[plt.Figure]]:
+def predict(
+    image: Optional[Image.Image], decoding: str, beam_size: int
+) -> tuple[str, Optional[plt.Figure]]:
     """Gradio callback: caption + attention figure for one uploaded image."""
     if STATE["model"] is None:
         return STATE["error"] or "Model not loaded.", None
@@ -46,8 +47,9 @@ def predict(image: Optional[Image.Image], decoding: str, beam_size: int
     x = TRANSFORM(image.convert("RGB")).unsqueeze(0)
     model, vocab = STATE["model"], STATE["vocab"]
     if decoding == "Beam search":
-        words, attn = generate_caption_beam_search(model, x, vocab, beam_size=int(beam_size),
-                                                   device=DEVICE, return_attention=True)
+        words, attn = generate_caption_beam_search(
+            model, x, vocab, beam_size=int(beam_size), device=DEVICE, return_attention=True
+        )
     else:
         words, attn = generate_caption_greedy(model, x, vocab, device=DEVICE)
     caption = " ".join(w for w in words if w not in ("<start>", "<end>", "<pad>"))
@@ -57,13 +59,15 @@ def predict(image: Optional[Image.Image], decoding: str, beam_size: int
 def build_demo() -> gr.Interface:
     return gr.Interface(
         fn=predict,
-        inputs=[gr.Image(type="pil", label="Upload image"),
-                gr.Radio(["Beam search", "Greedy"], value="Beam search", label="Decoding"),
-                gr.Slider(1, 10, value=3, step=1, label="Beam size")],
+        inputs=[
+            gr.Image(type="pil", label="Upload image"),
+            gr.Radio(["Beam search", "Greedy"], value="Beam search", label="Decoding"),
+            gr.Slider(1, 10, value=3, step=1, label="Beam size"),
+        ],
         outputs=[gr.Textbox(label="Generated caption"), gr.Plot(label="Attention per word")],
         title="Image Captioning — ResNet-50 + Transformer decoder",
         description="Heat-maps show where the decoder's cross-attention looked for each word "
-                    "(H = attention entropy; lower means more focused).",
+        "(H = attention entropy; lower means more focused).",
     )
 
 

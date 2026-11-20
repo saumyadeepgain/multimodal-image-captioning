@@ -16,7 +16,7 @@ Fixes vs. the first version:
 from __future__ import annotations
 
 import math
-from typing import List, Sequence
+from collections.abc import Sequence
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -39,8 +39,14 @@ def attention_entropy(attn) -> float:
     return float(-(p * np.log(p)).sum())
 
 
-def plot_attention(image: Image.Image, result_caption: Sequence[str], attention_plot: List,
-                   image_size: int = 224, cols: int = 4, cmap: str = "inferno"):
+def plot_attention(
+    image: Image.Image,
+    result_caption: Sequence[str],
+    attention_plot: list,
+    image_size: int = 224,
+    cols: int = 4,
+    cmap: str = "inferno",
+):
     """
     Args:
         image: the original PIL image.
@@ -50,8 +56,11 @@ def plot_attention(image: Image.Image, result_caption: Sequence[str], attention_
             ``attention_plot[i]`` belongs to ``result_caption[i + 1]``.
     """
     img = np.asarray(image.convert("RGB").resize((image_size, image_size)))
-    pairs = [(w, attention_plot[i - 1]) for i, w in enumerate(result_caption)
-             if i > 0 and w not in SKIP and i - 1 < len(attention_plot)]
+    pairs = [
+        (w, attention_plot[i - 1])
+        for i, w in enumerate(result_caption)
+        if i > 0 and w not in SKIP and i - 1 < len(attention_plot)
+    ]
     if not pairs:
         fig, ax = plt.subplots(figsize=(4, 4))
         ax.imshow(img)
@@ -65,8 +74,13 @@ def plot_attention(image: Image.Image, result_caption: Sequence[str], attention_
     for ax, (word, attn) in zip(axes.ravel(), pairs):
         grid = _to_grid(attn)
         ax.imshow(img)
-        ax.imshow(grid, cmap=cmap, alpha=0.55, extent=(0, image_size, image_size, 0),
-                  interpolation="bicubic")
+        ax.imshow(
+            grid,
+            cmap=cmap,
+            alpha=0.55,
+            extent=(0, image_size, image_size, 0),
+            interpolation="bicubic",
+        )
         ax.set_title(f"{word}  (H={attention_entropy(attn):.2f})", fontsize=12)
     fig.tight_layout()
     return fig

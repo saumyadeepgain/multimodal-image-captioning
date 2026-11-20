@@ -1,4 +1,5 @@
 """Tests for config, reproducibility, resume and gradient accumulation."""
+
 import copy
 
 import pytest
@@ -36,17 +37,28 @@ def test_fine_tune_keeps_frozen_stage_batchnorm_fixed():
 
 def _setup(tiny_flickr, seed=0, batch_size=8):
     img_dir, cap_file = tiny_flickr
-    ds, vocab = build_datasets(img_dir, cap_file, freq_threshold=1, val_frac=0.2,
-                               test_frac=0.2, image_size=64, seed=seed)
+    ds, vocab = build_datasets(
+        img_dir, cap_file, freq_threshold=1, val_frac=0.2, test_frac=0.2, image_size=64, seed=seed
+    )
     torch.manual_seed(seed)
-    model = ImageCaptioningModel(32, len(vocab), 1, 4, pretrained=False, dropout=0.0,
-                                 pad_idx=vocab.pad_idx)
-    banks = {s: precompute_features(model, ds[f"{s}_images"], "cpu", num_workers=0)
-             for s in ("train", "val")}
-    train = make_loader(CachedFeatureDataset(*banks["train"], ds["train"]), batch_size, True, 0,
-                        vocab.pad_idx, seed=seed)
-    val = make_loader(CachedFeatureDataset(*banks["val"], ds["val"]), batch_size, False, 0,
-                      vocab.pad_idx)
+    model = ImageCaptioningModel(
+        32, len(vocab), 1, 4, pretrained=False, dropout=0.0, pad_idx=vocab.pad_idx
+    )
+    banks = {
+        s: precompute_features(model, ds[f"{s}_images"], "cpu", num_workers=0)
+        for s in ("train", "val")
+    }
+    train = make_loader(
+        CachedFeatureDataset(*banks["train"], ds["train"]),
+        batch_size,
+        True,
+        0,
+        vocab.pad_idx,
+        seed=seed,
+    )
+    val = make_loader(
+        CachedFeatureDataset(*banks["val"], ds["val"]), batch_size, False, 0, vocab.pad_idx
+    )
     return model, vocab, train, val
 
 
@@ -65,7 +77,7 @@ def test_resume_is_bit_exact(tiny_flickr, tmp_path):
 
     model.load_state_dict(init)
     interrupted = _cfg(tmp_path / "part", 3)
-    interrupted.train.stop_after_epochs = 2          # simulate a job killed after epoch 2
+    interrupted.train.stop_after_epochs = 2  # simulate a job killed after epoch 2
     fit(interrupted, model, train, val, vocab, "cpu", cached=True)
     cfg = _cfg(tmp_path / "part", 3)
     cfg.train.resume = str(tmp_path / "part" / "last.pth")
@@ -89,10 +101,13 @@ def test_grad_accumulation_matches_large_batch(tiny_flickr):
         m = ImageCaptioningModel(32, V, 1, 4, pretrained=False, dropout=0.0)
         opt = torch.optim.SGD(m.parameters(), lr=0.1)
         sched = warmup_cosine(opt, 0, 10)
-        loader = [(feats[i:i + batch_size], caps[i:i + batch_size]) for i in range(0, 8, batch_size)]
+        loader = [
+            (feats[i : i + batch_size], caps[i : i + batch_size]) for i in range(0, 8, batch_size)
+        ]
         crit = torch.nn.CrossEntropyLoss(ignore_index=0)
-        train_epoch(m, loader, crit, opt, sched, torch.device("cpu"), cached=True,
-                    grad_accum_steps=accum)
+        train_epoch(
+            m, loader, crit, opt, sched, torch.device("cpu"), cached=True, grad_accum_steps=accum
+        )
         return m.state_dict()
 
     a, b = one_step(8, 1), one_step(4, 2)
@@ -102,12 +117,25 @@ def test_grad_accumulation_matches_large_batch(tiny_flickr):
 
 def test_run_from_config_writes_artifacts(tiny_flickr, tmp_path):
     img_dir, cap_file = tiny_flickr
-    cfg = load_config(None, [f"data.img_dir={img_dir!r}", f"data.captions_file={cap_file!r}",
-                             "data.freq_threshold=1", "data.image_size=64", "data.num_workers=0",
-                             "data.val_frac=0.2", "data.test_frac=0.2",
-                             "model.embed_size=32", "model.num_layers=1", "model.nhead=4",
-                             "model.pretrained=false", "train.epochs=2", "train.amp=false",
-                             f"train.out_dir={str(tmp_path / 'run')!r}"])
+    cfg = load_config(
+        None,
+        [
+            f"data.img_dir={img_dir!r}",
+            f"data.captions_file={cap_file!r}",
+            "data.freq_threshold=1",
+            "data.image_size=64",
+            "data.num_workers=0",
+            "data.val_frac=0.2",
+            "data.test_frac=0.2",
+            "model.embed_size=32",
+            "model.num_layers=1",
+            "model.nhead=4",
+            "model.pretrained=false",
+            "train.epochs=2",
+            "train.amp=false",
+            f"train.out_dir={str(tmp_path / 'run')!r}",
+        ],
+    )
     hist = run(cfg)
     assert len(hist["train_loss"]) == 2 and hist["val_cider"][0] is not None
     for f in ("best_model.pth", "last.pth", "history.json", "config.yaml"):

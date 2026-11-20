@@ -28,7 +28,7 @@ import ast
 import dataclasses
 import typing
 from dataclasses import asdict, dataclass, field, fields
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Optional
 
 import yaml
 
@@ -36,60 +36,64 @@ import yaml
 @dataclass
 class DataConfig:
     """Dataset location, split and vocabulary settings."""
+
     img_dir: str = "data/archive/Images"
     captions_file: str = "data/archive/captions.txt"
     val_frac: float = 0.1
     test_frac: float = 0.1
-    freq_threshold: int = 5          # min train-caption count for a word to enter the vocab
-    max_len: int = 40                # max caption tokens incl. <start>/<end>
+    freq_threshold: int = 5  # min train-caption count for a word to enter the vocab
+    max_len: int = 40  # max caption tokens incl. <start>/<end>
     image_size: int = 224
     num_workers: int = 4
-    verify_images: bool = True       # drop missing / unreadable images before training
+    verify_images: bool = True  # drop missing / unreadable images before training
 
 
 @dataclass
 class ModelConfig:
     """Architecture settings (must match between training and inference)."""
+
     embed_size: int = 512
     num_layers: int = 3
     nhead: int = 8
     dropout: float = 0.1
     max_seq_length: int = 64
     tie_weights: bool = False
-    train_CNN: bool = False          # fine-tune ResNet layer4
-    pretrained: bool = True          # ImageNet weights for the backbone
+    train_CNN: bool = False  # fine-tune ResNet layer4
+    pretrained: bool = True  # ImageNet weights for the backbone
 
 
 @dataclass
 class TrainConfig:
     """Optimisation settings."""
+
     epochs: int = 20
     batch_size: int = 64
-    grad_accum_steps: int = 1        # effective batch = batch_size * grad_accum_steps
+    grad_accum_steps: int = 1  # effective batch = batch_size * grad_accum_steps
     lr: float = 3e-4
-    encoder_lr_mult: float = 0.1     # LR multiplier for fine-tuned CNN layers
+    encoder_lr_mult: float = 0.1  # LR multiplier for fine-tuned CNN layers
     weight_decay: float = 0.01
     label_smoothing: float = 0.1
-    warmup_ratio: float = 0.05       # linear warm-up, then cosine annealing
-    min_lr_ratio: float = 0.05       # cosine floor as a fraction of the base LR
+    warmup_ratio: float = 0.05  # linear warm-up, then cosine annealing
+    min_lr_ratio: float = 0.05  # cosine floor as a fraction of the base LR
     max_grad_norm: float = 1.0
-    amp: bool = True                 # bf16 autocast, or fp16 + GradScaler (CUDA only)
-    cache_features: bool = True      # only used when the CNN is frozen
-    augment: bool = True             # only used when features are NOT cached
-    patience: int = 5                # early stopping (epochs without improvement)
-    min_delta: float = 0.0           # minimum improvement that resets patience
-    select_metric: str = "BLEU-4"    # "BLEU-4", "CIDEr" or "val_loss"
-    bleu_limit: int = 0              # val images decoded per epoch for selection (0 = all)
-    max_oom_splits: int = 8          # on CUDA OOM, split a batch into up to N micro-batches
+    amp: bool = True  # bf16 autocast, or fp16 + GradScaler (CUDA only)
+    cache_features: bool = True  # only used when the CNN is frozen
+    augment: bool = True  # only used when features are NOT cached
+    patience: int = 5  # early stopping (epochs without improvement)
+    min_delta: float = 0.0  # minimum improvement that resets patience
+    select_metric: str = "BLEU-4"  # "BLEU-4", "CIDEr" or "val_loss"
+    bleu_limit: int = 0  # val images decoded per epoch for selection (0 = all)
+    max_oom_splits: int = 8  # on CUDA OOM, split a batch into up to N micro-batches
     out_dir: str = "checkpoints"
-    resume: Optional[str] = None     # path to last.pth to resume from
+    resume: Optional[str] = None  # path to last.pth to resume from
     stop_after_epochs: Optional[int] = None  # end this process after N epochs (time-limited
-                                             # jobs); continue later with --resume
+    # jobs); continue later with --resume
 
 
 @dataclass
 class EvalConfig:
     """Decoding / evaluation settings."""
+
     beam_size: int = 3
     max_length: int = 30
     length_penalty: float = 0.7
@@ -100,30 +104,32 @@ class EvalConfig:
 @dataclass
 class TrackingConfig:
     """Optional experiment tracking (logs always go to console + a timestamped file)."""
-    backend: str = "none"            # "none", "tensorboard" or "wandb"
+
+    backend: str = "none"  # "none", "tensorboard" or "wandb"
     project: str = "image-captioning"
-    run_name: Optional[str] = None   # default: timestamp
-    log_every_n_steps: int = 50      # step-level train loss / LR / grad-norm
-    wandb_mode: str = "online"       # "online", "offline" or "disabled"
+    run_name: Optional[str] = None  # default: timestamp
+    log_every_n_steps: int = 50  # step-level train loss / LR / grad-norm
+    wandb_mode: str = "online"  # "online", "offline" or "disabled"
 
 
 @dataclass
 class Config:
     """Root configuration."""
+
     data: DataConfig = field(default_factory=DataConfig)
     model: ModelConfig = field(default_factory=ModelConfig)
     train: TrainConfig = field(default_factory=TrainConfig)
     eval: EvalConfig = field(default_factory=EvalConfig)
     tracking: TrackingConfig = field(default_factory=TrackingConfig)
     seed: int = 42
-    deterministic: bool = False      # cuDNN deterministic algorithms (slower)
-    device: str = "auto"             # "auto" (cuda > mps > cpu), "cuda", "cuda:1", "mps", "cpu"
+    deterministic: bool = False  # cuDNN deterministic algorithms (slower)
+    device: str = "auto"  # "auto" (cuda > mps > cpu), "cuda", "cuda:1", "mps", "cpu"
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
     @classmethod
-    def from_dict(cls, d: Dict[str, Any]) -> "Config":
+    def from_dict(cls, d: dict[str, Any]) -> Config:
         """Build a Config from a (possibly partial) nested dict; unknown keys raise."""
         cfg = cls()
         for key, value in (d or {}).items():
@@ -134,9 +140,9 @@ class Config:
         with open(path, "w") as f:
             yaml.safe_dump(self.to_dict(), f, sort_keys=False)
 
-    def validate(self) -> "Config":
+    def validate(self) -> Config:
         """Raise ``ValueError`` listing every inconsistent setting."""
-        errors: List[str] = []
+        errors: list[str] = []
         d, m, t, e, tr = self.data, self.model, self.train, self.eval, self.tracking
         if not (0 <= d.val_frac < 1 and 0 <= d.test_frac < 1 and d.val_frac + d.test_frac < 1):
             errors.append("data.val_frac + data.test_frac must be in [0, 1)")
@@ -147,8 +153,9 @@ class Config:
         if d.num_workers < 0:
             errors.append("data.num_workers must be >= 0")
         if m.embed_size % m.nhead != 0:
-            errors.append(f"model.embed_size ({m.embed_size}) must be divisible by "
-                          f"model.nhead ({m.nhead})")
+            errors.append(
+                f"model.embed_size ({m.embed_size}) must be divisible by model.nhead ({m.nhead})"
+            )
         if not 0 <= m.dropout < 1:
             errors.append("model.dropout must be in [0, 1)")
         if m.max_seq_length < max(d.max_len, e.max_length + 1):
@@ -174,8 +181,12 @@ class Config:
             errors.append("tracking.wandb_mode must be 'online', 'offline' or 'disabled'")
         if tr.log_every_n_steps < 1:
             errors.append("tracking.log_every_n_steps must be >= 1")
-        if not (self.device == "auto" or self.device == "cpu" or self.device == "mps"
-                or self.device.startswith("cuda")):
+        if not (
+            self.device == "auto"
+            or self.device == "cpu"
+            or self.device == "mps"
+            or self.device.startswith("cuda")
+        ):
             errors.append("device must be 'auto', 'cpu', 'mps', 'cuda' or 'cuda:N'")
         if errors:
             raise ValueError("Invalid configuration:\n  - " + "\n  - ".join(errors))
@@ -185,7 +196,7 @@ class Config:
 # --------------------------------------------------------------------------- #
 # Setting values with type checking
 # --------------------------------------------------------------------------- #
-def _field_types(obj: Any) -> Dict[str, Any]:
+def _field_types(obj: Any) -> dict[str, Any]:
     return typing.get_type_hints(type(obj))
 
 
@@ -193,12 +204,12 @@ def _coerce(value: Any, annotation: Any, key: str) -> Any:
     """Check / convert ``value`` against a field annotation."""
     origin = typing.get_origin(annotation)
     args = typing.get_args(annotation)
-    if origin is typing.Union and type(None) in args:          # Optional[X]
+    if origin is typing.Union and type(None) in args:  # Optional[X]
         if value is None or (isinstance(value, str) and value.lower() in ("none", "null")):
             return None
         annotation = next(a for a in args if a is not type(None))
     if isinstance(value, str) and annotation is not str:
-        value = _parse_value(value)                             # CLI text -> typed value
+        value = _parse_value(value)  # CLI text -> typed value
     if annotation is bool:
         if isinstance(value, bool):
             return value
@@ -217,7 +228,7 @@ def _coerce(value: Any, annotation: Any, key: str) -> Any:
         if not isinstance(value, str):
             return str(value)
         if len(value) >= 2 and value[0] == value[-1] and value[0] in "'\"":
-            return value[1:-1]                                  # --set k='a b' -> a b
+            return value[1:-1]  # --set k='a b' -> a b
         return value
     return value
 
@@ -260,18 +271,19 @@ def set_by_path(cfg: Config, dotted: str, value: Any) -> None:
     _set(target, parts[-1], value, prefix=".".join(parts[:-1]) + ("." if len(parts) > 1 else ""))
 
 
-def apply_overrides(cfg: Config, overrides: List[str]) -> Config:
+def apply_overrides(cfg: Config, overrides: list[str]) -> Config:
     """Apply ``section.key=value`` overrides, e.g. ``train.lr=1e-4``."""
     for item in overrides or []:
         if "=" not in item:
             raise ValueError(f"override '{item}' must look like section.key=value")
         dotted, raw = item.split("=", 1)
-        set_by_path(cfg, dotted, raw)          # parsed against the field type
+        set_by_path(cfg, dotted, raw)  # parsed against the field type
     return cfg
 
 
-def load_config(path: Optional[str] = None, overrides: Optional[List[str]] = None,
-                validate: bool = True) -> Config:
+def load_config(
+    path: Optional[str] = None, overrides: Optional[list[str]] = None, validate: bool = True
+) -> Config:
     """Defaults <- YAML file (if given) <- ``section.key=value`` overrides."""
     cfg = Config()
     if path:
@@ -290,9 +302,9 @@ def load_config(path: Optional[str] = None, overrides: Optional[List[str]] = Non
 _SECTION_PRIORITY = ("train", "model", "data", "eval", "tracking")
 
 
-def config_keys() -> List[Tuple[str, Any]]:
+def config_keys() -> list[tuple[str, Any]]:
     """All leaf keys as ``(dotted_path, default)``."""
-    out: List[Tuple[str, Any]] = []
+    out: list[tuple[str, Any]] = []
 
     def walk(obj: Any, prefix: str) -> None:
         for f in fields(obj):
@@ -301,28 +313,33 @@ def config_keys() -> List[Tuple[str, Any]]:
                 walk(value, f"{prefix}{f.name}.")
             else:
                 out.append((f"{prefix}{f.name}", value))
+
     walk(Config(), "")
     return out
 
 
-def short_aliases() -> Dict[str, str]:
+def short_aliases() -> dict[str, str]:
     """Short flag name -> dotted key, resolving clashes by section priority."""
-    by_name: Dict[str, List[str]] = {}
+    by_name: dict[str, list[str]] = {}
     for dotted, _ in config_keys():
         by_name.setdefault(dotted.split(".")[-1], []).append(dotted)
-    aliases = {}
-    for name, paths in by_name.items():
-        rank = lambda p: (_SECTION_PRIORITY.index(p.split(".")[0])  # noqa: E731
-                          if "." in p else -1)
-        aliases[name] = sorted(paths, key=rank)[0]
-    return aliases
+
+    def rank(path: str) -> int:
+        return _SECTION_PRIORITY.index(path.split(".")[0]) if "." in path else -1
+
+    return {name: sorted(paths, key=rank)[0] for name, paths in by_name.items()}
 
 
 def add_config_arguments(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     """Add ``--config``, ``--set`` and one flag per config key to ``parser``."""
     parser.add_argument("--config", default=None, help="YAML config file")
-    parser.add_argument("--set", nargs="*", default=[], metavar="KEY=VALUE",
-                        help="overrides applied last, e.g. train.lr=1e-4")
+    parser.add_argument(
+        "--set",
+        nargs="*",
+        default=[],
+        metavar="KEY=VALUE",
+        help="overrides applied last, e.g. train.lr=1e-4",
+    )
     group = parser.add_argument_group("config keys (any key in configs/default.yaml)")
     aliases = short_aliases()
     alias_for = {dotted: name for name, dotted in aliases.items()}
@@ -335,10 +352,14 @@ def add_config_arguments(parser: argparse.ArgumentParser) -> argparse.ArgumentPa
         flags += [f.replace("_", "-") for f in flags if "_" in f]
         flags = [f for f in dict.fromkeys(flags) if f not in taken]
         taken.update(flags)
-        kwargs: Dict[str, Any] = dict(dest=f"cfg__{dotted}", default=argparse.SUPPRESS,
-                                      help=f"(default: {default})", metavar="V")
+        kwargs: dict[str, Any] = dict(
+            dest=f"cfg__{dotted}",
+            default=argparse.SUPPRESS,
+            help=f"(default: {default})",
+            metavar="V",
+        )
         if isinstance(default, bool):
-            kwargs.update(nargs="?", const="true")          # "--amp" or "--amp false"
+            kwargs.update(nargs="?", const="true")  # "--amp" or "--amp false"
         group.add_argument(*flags, **kwargs)
     return parser
 
@@ -348,6 +369,6 @@ def config_from_args(args: argparse.Namespace) -> Config:
     cfg = load_config(getattr(args, "config", None), validate=False)
     for dest, raw in vars(args).items():
         if dest.startswith("cfg__"):
-            set_by_path(cfg, dest[len("cfg__"):], raw)
+            set_by_path(cfg, dest[len("cfg__") :], raw)
     cfg = apply_overrides(cfg, getattr(args, "set", None) or [])
     return cfg.validate()

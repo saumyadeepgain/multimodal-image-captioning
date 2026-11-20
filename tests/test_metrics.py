@@ -9,7 +9,10 @@ WORDS = "a dog man runs on the grass in red ball water boy jumps".split()
 
 def _corpus(seed=0, n=30):
     rng = random.Random(seed)
-    sent = lambda: [rng.choice(WORDS) for _ in range(rng.randint(3, 10))]
+
+    def sent():
+        return [rng.choice(WORDS) for _ in range(rng.randint(3, 10))]
+
     refs = [[sent() for _ in range(5)] for _ in range(n)]
     hyps = [sent() if i % 3 else list(refs[i][0]) for i in range(n)]
     return hyps, refs
@@ -35,6 +38,7 @@ def test_cider_matches_pycocoevalcap():
 def test_rouge_matches_pycocoevalcap():
     Rouge = pytest.importorskip("pycocoevalcap.rouge.rouge").Rouge
     from src.metrics import rouge_l
+
     hyps, refs = _corpus(2)
     gts = {i: [" ".join(r) for r in rs] for i, rs in enumerate(refs)}
     res = {i: [" ".join(h)] for i, h in enumerate(hyps)}

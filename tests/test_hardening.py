@@ -1,4 +1,5 @@
 """Tests for CLI flags, config validation, tracking, OOM recovery and data edge cases."""
+
 import argparse
 import logging
 import os
@@ -9,7 +10,7 @@ import pytest
 import torch
 
 from src.config import add_config_arguments, config_from_args, load_config
-from src.dataset import build_datasets, verify_image_pairs, load_captions
+from src.dataset import build_datasets, load_captions, verify_image_pairs
 from src.model import ImageCaptioningModel
 from src.tracking import ExperimentTracker
 from src.train import train_epoch, warmup_cosine
@@ -24,9 +25,25 @@ def _parse(argv):
 
 # ----------------------------------------------------------------- CLI / config
 def test_flat_and_dotted_cli_flags():
-    cfg = _parse(["--lr", "1e-4", "--batch_size", "32", "--eval.batch_size", "8",
-                  "--amp", "false", "--tie-weights", "--resume", "ck/last.pth",
-                  "--run_name", "001", "--set", "train.epochs=3"])
+    cfg = _parse(
+        [
+            "--lr",
+            "1e-4",
+            "--batch_size",
+            "32",
+            "--eval.batch_size",
+            "8",
+            "--amp",
+            "false",
+            "--tie-weights",
+            "--resume",
+            "ck/last.pth",
+            "--run_name",
+            "001",
+            "--set",
+            "train.epochs=3",
+        ]
+    )
     assert cfg.train.lr == 1e-4 and cfg.train.batch_size == 32 and cfg.eval.batch_size == 8
     assert cfg.train.amp is False and cfg.model.tie_weights is True
     assert cfg.train.resume == "ck/last.pth" and cfg.tracking.run_name == "001"
@@ -40,13 +57,16 @@ def test_cli_precedence_yaml_then_flags_then_set(tmp_path):
     assert cfg.train.lr == 0.03 and cfg.train.epochs == 7
 
 
-@pytest.mark.parametrize("argv, message", [
-    (["--lr", "abc"], "expects a number"),
-    (["--epochs", "2.5"], "expects an integer"),
-    (["--embed_size", "100"], "divisible"),
-    (["--backend", "mlflow"], "tracking.backend"),
-    (["--select_metric", "loss"], "select_metric"),
-])
+@pytest.mark.parametrize(
+    "argv, message",
+    [
+        (["--lr", "abc"], "expects a number"),
+        (["--epochs", "2.5"], "expects an integer"),
+        (["--embed_size", "100"], "divisible"),
+        (["--backend", "mlflow"], "tracking.backend"),
+        (["--select_metric", "loss"], "select_metric"),
+    ],
+)
 def test_invalid_values_are_rejected(argv, message):
     with pytest.raises((TypeError, ValueError), match=message):
         _parse(argv)
@@ -62,11 +82,20 @@ def test_unknown_yaml_key_is_rejected(tmp_path):
 def test_script_mode_help_runs():
     """`python src/train.py --help` works without -m (relative-import bootstrap)."""
     for script in ("src/train.py", "src/evaluate.py", "src/predict.py"):
-        out = subprocess.run([sys.executable, script, "--help"], cwd=REPO, capture_output=True,
-                             text=True, timeout=120)
+        out = subprocess.run(
+            [sys.executable, script, "--help"],
+            cwd=REPO,
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
         assert out.returncode == 0, out.stderr
-    assert "--batch_size" in subprocess.run([sys.executable, "src/train.py", "--help"], cwd=REPO,
-                                            capture_output=True, text=True).stdout
+    assert (
+        "--batch_size"
+        in subprocess.run(
+            [sys.executable, "src/train.py", "--help"], cwd=REPO, capture_output=True, text=True
+        ).stdout
+    )
 
 
 # ---------------------------------------------------------------------- device
@@ -114,7 +143,7 @@ def test_oom_microbatching_matches_full_batch():
     feats = torch.randn(8, 49, 2048)
     caps = torch.randint(4, V, (8, 7))
     caps[:, 0] = 1
-    caps[:3, 5:] = 0                                   # unequal lengths: token weighting matters
+    caps[:3, 5:] = 0  # unequal lengths: token weighting matters
 
     def one_epoch(oom_above):
         torch.manual_seed(0)
@@ -126,12 +155,20 @@ def test_oom_microbatching_matches_full_batch():
                 if k["captions"].size(0) > oom_above:
                     raise torch.cuda.OutOfMemoryError("CUDA out of memory (simulated)")
                 return real(*a, **k)
+
             m.forward = flaky
         opt = torch.optim.SGD(m.parameters(), lr=0.1)
         state = {"chunks": 1}
-        stats = train_epoch(m, [(feats, caps)], torch.nn.CrossEntropyLoss(ignore_index=0), opt,
-                            warmup_cosine(opt, 0, 10), torch.device("cpu"), cached=True,
-                            oom_state=state)
+        stats = train_epoch(
+            m,
+            [(feats, caps)],
+            torch.nn.CrossEntropyLoss(ignore_index=0),
+            opt,
+            warmup_cosine(opt, 0, 10),
+            torch.device("cpu"),
+            cached=True,
+            oom_state=state,
+        )
         return m.state_dict(), stats, state
 
     full, s_full, _ = one_epoch(None)
@@ -147,12 +184,21 @@ def test_oom_beyond_limit_reraises():
 
     def always(*a, **k):
         raise torch.cuda.OutOfMemoryError("CUDA out of memory (simulated)")
+
     m.forward = always
     opt = torch.optim.SGD(m.parameters(), lr=0.1)
     batch = (torch.randn(4, 49, 2048), torch.randint(1, 20, (4, 6)))
     with pytest.raises(torch.cuda.OutOfMemoryError):
-        train_epoch(m, [batch], torch.nn.CrossEntropyLoss(ignore_index=0), opt,
-                    warmup_cosine(opt, 0, 1), torch.device("cpu"), cached=True, max_oom_splits=2)
+        train_epoch(
+            m,
+            [batch],
+            torch.nn.CrossEntropyLoss(ignore_index=0),
+            opt,
+            warmup_cosine(opt, 0, 1),
+            torch.device("cpu"),
+            cached=True,
+            max_oom_splits=2,
+        )
     assert is_oom_error(RuntimeError("CUDA error: out of memory"))
     assert not is_oom_error(RuntimeError("shape mismatch"))
 
@@ -173,8 +219,8 @@ def test_missing_paths_raise_clear_errors(tiny_flickr, tmp_path):
 def test_corrupt_and_missing_images_are_dropped(tiny_flickr, caplog):
     img_dir, cap_file = tiny_flickr
     with open(os.path.join(img_dir, "img_0.jpg"), "wb") as f:
-        f.write(b"not a jpeg")                         # corrupted file
-    os.remove(os.path.join(img_dir, "img_1.jpg"))      # missing file
+        f.write(b"not a jpeg")  # corrupted file
+    os.remove(os.path.join(img_dir, "img_1.jpg"))  # missing file
     with caplog.at_level(logging.WARNING, logger="captioning"):
         pairs = verify_image_pairs(img_dir, load_captions(cap_file))
     assert {i for i, _ in pairs} == {f"img_{k}.jpg" for k in range(2, 20)}
@@ -183,17 +229,18 @@ def test_corrupt_and_missing_images_are_dropped(tiny_flickr, caplog):
 
 def test_runtime_corruption_falls_back_to_next_sample(tiny_flickr, caplog):
     img_dir, cap_file = tiny_flickr
-    ds, _ = build_datasets(img_dir, cap_file, freq_threshold=1, val_frac=0.2, test_frac=0.2,
-                           image_size=64)
+    ds, _ = build_datasets(
+        img_dir, cap_file, freq_threshold=1, val_frac=0.2, test_frac=0.2, image_size=64
+    )
     train = ds["train"]
     bad = train.imgs[0]
     with open(os.path.join(img_dir, bad), "wb") as f:
-        f.write(b"\xff\xd8\xff garbage")                # truncated JPEG header
+        f.write(b"\xff\xd8\xff garbage")  # truncated JPEG header
     with caplog.at_level(logging.WARNING, logger="captioning"):
         img, cap = train[0]
     assert img.shape == (3, 64, 64)
     j = next(k for k, name in enumerate(train.imgs) if name != bad)
-    assert torch.equal(cap, train.encoded[j])          # caption belongs to the replacement
+    assert torch.equal(cap, train.encoded[j])  # caption belongs to the replacement
     assert "Unreadable image" in caplog.text
     train.strict = True
     with pytest.raises(OSError):
@@ -212,6 +259,7 @@ def test_all_images_missing_is_an_error(tiny_flickr):
 def test_resume_error_messages(tmp_path):
     from src.dataset import Vocabulary
     from src.utils import save_checkpoint
+
     v = Vocabulary(1)
     v.build_vocabulary(["a b c"])
     m = ImageCaptioningModel(32, len(v), 1, 4, pretrained=False)
