@@ -10,16 +10,20 @@ from __future__ import annotations
 
 import argparse
 import json
+from typing import Any, List
 
 import torch
 from PIL import Image
 
-from .checkpoint import load_checkpoint
-from .dataset import get_transforms
+from .dataset import Vocabulary, get_transforms
+from .model import ImageCaptioningModel
+from .utils import get_device, load_checkpoint
 from .inference import beam_search_batch, greedy_decode
 
 
-def caption_images(model, vocab, paths, beam: int = 3, max_length: int = 30, device="cpu"):
+def caption_images(model: ImageCaptioningModel, vocab: Vocabulary, paths: List[str], beam: int = 3,
+                   max_length: int = 30, device: Any = "cpu") -> List[str]:
+    """Caption image files in one batch (greedy if ``beam <= 1``)."""
     tf = get_transforms(train=False)
     x = torch.stack([tf(Image.open(p).convert("RGB")) for p in paths])
     if beam <= 1:
@@ -30,7 +34,7 @@ def caption_images(model, vocab, paths, beam: int = 3, max_length: int = 30, dev
     return [" ".join(vocab.decode(s)) for s in ids]
 
 
-def main():
+def main() -> None:
     ap = argparse.ArgumentParser(description="Caption images with a trained checkpoint")
     ap.add_argument("images", nargs="+")
     ap.add_argument("--checkpoint", default="checkpoints/best_model.pth")
@@ -40,7 +44,7 @@ def main():
     ap.add_argument("--json", action="store_true", help="print JSON instead of text")
     args = ap.parse_args()
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = get_device()
     model, vocab, _ = load_checkpoint(args.checkpoint, device)
     caps = caption_images(model, vocab, args.images, args.beam, args.max_length, device)
     if args.json:

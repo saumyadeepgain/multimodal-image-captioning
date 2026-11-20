@@ -32,7 +32,7 @@ Changes compared with the first version (details in docs/IMPROVEMENTS.pdf):
 from __future__ import annotations
 
 import math
-from typing import Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -63,10 +63,16 @@ class EncoderCNN(nn.Module):
         self.pos_embed = nn.Parameter(torch.zeros(1, grid_size * grid_size, embed_size))
         nn.init.trunc_normal_(self.pos_embed, std=0.02)
 
-    def train(self, mode: bool = True):
+    def train(self, mode: bool = True) -> "EncoderCNN":
+        """Frozen ResNet stages always stay in eval mode, so their BatchNorm
+        running statistics never change. When fine-tuning, only layer4 (child
+        "7") is switched to train mode -- the earlier version put the *whole*
+        ResNet in train mode, so layers 1-3 drifted although they were frozen."""
         super().train(mode)
-        if not self.train_CNN:
-            self.resnet.eval()  # keep BatchNorm statistics frozen
+        if mode:
+            for name, stage in self.resnet.named_children():
+                if not (self.train_CNN and name == "7"):
+                    stage.eval()
         return self
 
     def backbone(self, images: torch.Tensor) -> torch.Tensor:
@@ -122,8 +128,11 @@ class CustomTransformerDecoderLayer(nn.Module):
         self.dropout2 = nn.Dropout(dropout)
         self.dropout3 = nn.Dropout(dropout)
 
-    def forward(self, tgt, memory, tgt_mask=None, tgt_key_padding_mask=None,
-                need_weights: bool = False):
+    def forward(self, tgt: torch.Tensor, memory: torch.Tensor,
+                tgt_mask: Optional[torch.Tensor] = None,
+                tgt_key_padding_mask: Optional[torch.Tensor] = None,
+                need_weights: bool = False) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+        """Full-sequence pass (training / scoring). Returns (output, cross-attn or None)."""
         x = self.norm1(tgt)
         sa, _ = self.self_attn(x, x, x, attn_mask=tgt_mask,
                                key_padding_mask=tgt_key_padding_mask, need_weights=False)
@@ -139,11 +148,11 @@ class CustomTransformerDecoderLayer(nn.Module):
 
     # ----------------------------------------------------------- KV-cache path
     @staticmethod
-    def _heads(x, nhead):
+    def _heads(x: torch.Tensor, nhead: int) -> torch.Tensor:
         B, T, E = x.shape
         return x.view(B, T, nhead, E // nhead).transpose(1, 2)  # (B, H, T, Dh)
 
-    def project_memory(self, memory):
+    def project_memory(self, memory: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         """Cross-attention keys/values for the image, computed once."""
         mha = self.multihead_attn
         E = memory.size(-1)
@@ -152,7 +161,8 @@ class CustomTransformerDecoderLayer(nn.Module):
         v = F.linear(memory, w[2 * E:], b[2 * E:])
         return self._heads(k, mha.num_heads), self._heads(v, mha.num_heads)
 
-    def step(self, x, cache, need_weights: bool = False):
+    def step(self, x: torch.Tensor, cache: Dict[str, Optional[torch.Tensor]],
+             need_weights: bool = False) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         """One token (B, 1, E) using/extending ``cache`` (eval mode only)."""
         sa_mha, ca_mha = self.self_attn, self.multihead_attn
         H = sa_mha.num_heads
@@ -217,8 +227,10 @@ class DecoderTransformer(nn.Module):
         """Boolean mask, True = position may NOT be attended to."""
         return self.causal_mask[:sz, :sz]
 
-    def forward(self, features, captions, return_attention: bool = False,
+    def forward(self, features: torch.Tensor, captions: torch.Tensor, return_attention: bool = False,
                 padding_mask: Optional[torch.Tensor] = None):
+        """Teacher-forced decoding. features (B, S, E), captions (B, T) -> logits (B, T, V)
+        [, last-layer head-averaged cross-attention (B, T, S)]."""
         # features: (B, 49, E) memory; captions: (B, T) token ids
         T_ = captions.size(1)
         x = self.embed(captions) * math.sqrt(self.embed_size)
@@ -236,7 +248,7 @@ class DecoderTransformer(nn.Module):
         out = self.fc_out(self.final_norm(x) * self.out_scale)
         return (out, attn) if return_attention else out
 
-    def init_cache(self, memory):
+    def init_cache(self, memory: torch.Tensor) -> List[Dict[str, Optional[torch.Tensor]]]:
         """Per-layer cache with pre-projected image keys/values."""
         caches = []
         for layer in self.layers:
@@ -245,7 +257,8 @@ class DecoderTransformer(nn.Module):
         return caches
 
     @staticmethod
-    def reorder_cache(caches, index):
+    def reorder_cache(caches: List[Dict[str, Optional[torch.Tensor]]], index: torch.Tensor
+                      ) -> List[Dict[str, Optional[torch.Tensor]]]:
         """Select batch rows (used by beam search when beams are re-ranked)."""
         for c in caches:
             for key in ("mk", "mv", "k", "v"):
@@ -253,7 +266,8 @@ class DecoderTransformer(nn.Module):
                     c[key] = c[key].index_select(0, index)
         return caches
 
-    def step(self, tokens, position: int, caches, return_attention: bool = False):
+    def step(self, tokens: torch.Tensor, position: int,
+             caches: List[Dict[str, Optional[torch.Tensor]]], return_attention: bool = False):
         """Logits for the next token given the last tokens (B,) at ``position``."""
         if position >= self.max_seq_length:
             raise ValueError(f"position {position} exceeds max_len {self.max_seq_length}")
@@ -283,19 +297,32 @@ class ImageCaptioningModel(nn.Module):
                                           max_seq_length=max_seq_length, dropout=dropout,
                                           pad_idx=pad_idx, tie_weights=tie_weights)
 
-    def encode(self, images=None, backbone_features=None):
+    @classmethod
+    def from_config(cls, model_cfg, vocab_size: int, pad_idx: int) -> "ImageCaptioningModel":
+        """Build from a ``config.ModelConfig``."""
+        return cls(embed_size=model_cfg.embed_size, vocab_size=vocab_size,
+                   num_layers=model_cfg.num_layers, nhead=model_cfg.nhead,
+                   train_CNN=model_cfg.train_CNN, pretrained=model_cfg.pretrained,
+                   dropout=model_cfg.dropout, max_seq_length=model_cfg.max_seq_length,
+                   pad_idx=pad_idx, tie_weights=model_cfg.tie_weights)
+
+    def encode(self, images: Optional[torch.Tensor] = None,
+               backbone_features: Optional[torch.Tensor] = None) -> torch.Tensor:
+        """Image memory (B, 49, E) from raw images or cached backbone features."""
         if backbone_features is not None:
             return self.encoder.project_features(backbone_features)
         return self.encoder(images)
 
-    def forward(self, images=None, captions=None, return_attention: bool = False,
-                backbone_features=None):
+    def forward(self, images: Optional[torch.Tensor] = None,
+                captions: Optional[torch.Tensor] = None, return_attention: bool = False,
+                backbone_features: Optional[torch.Tensor] = None):
         """Teacher forcing: decoder input is ``captions[:, :-1]`` and the
         logits are aligned with targets ``captions[:, 1:]``."""
         memory = self.encode(images, backbone_features)
         return self.decoder(memory, captions[:, :-1], return_attention)
 
-    def param_groups(self, lr: float, weight_decay: float, encoder_lr_mult: float = 0.1):
+    def param_groups(self, lr: float, weight_decay: float, encoder_lr_mult: float = 0.1
+                     ) -> List[Dict[str, Any]]:
         """AdamW groups: no decay on biases/norms/embeddings, lower LR for the CNN."""
         decay, no_decay, cnn = [], [], []
         seen = set()

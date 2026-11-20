@@ -9,21 +9,24 @@ now carries its own config and vocabulary.
 
 import argparse
 import os
+from typing import Optional, Tuple
 
 import gradio as gr
-import torch
+import matplotlib.pyplot as plt
+from PIL import Image
 
 from src.attention_viz import plot_attention
-from src.checkpoint import load_checkpoint
 from src.dataset import get_transforms
 from src.inference import generate_caption_beam_search, generate_caption_greedy
+from src.utils import get_device, load_checkpoint
 
-DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+DEVICE = get_device()
 TRANSFORM = get_transforms(train=False)
 STATE = {"model": None, "vocab": None, "error": None}
 
 
 def load(path: str) -> None:
+    """Load the checkpoint into STATE (errors are shown in the UI, not raised)."""
     if not os.path.exists(path):
         STATE["error"] = f"No checkpoint at {path}. Train first: python -m src.train"
         return
@@ -33,7 +36,9 @@ def load(path: str) -> None:
         STATE["error"] = f"Failed to load {path}: {e}"
 
 
-def predict(image, decoding: str, beam_size: int):
+def predict(image: Optional[Image.Image], decoding: str, beam_size: int
+            ) -> Tuple[str, Optional[plt.Figure]]:
+    """Gradio callback: caption + attention figure for one uploaded image."""
     if STATE["model"] is None:
         return STATE["error"] or "Model not loaded.", None
     if image is None:
@@ -49,7 +54,7 @@ def predict(image, decoding: str, beam_size: int):
     return caption, plot_attention(image, words, attn)
 
 
-def build_demo():
+def build_demo() -> gr.Interface:
     return gr.Interface(
         fn=predict,
         inputs=[gr.Image(type="pil", label="Upload image"),

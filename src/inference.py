@@ -17,25 +17,34 @@ Old version vs. new:
 
 from __future__ import annotations
 
-from typing import List, Optional, Tuple
+from typing import TYPE_CHECKING, Any, List, Optional, Tuple
 
 import torch
 import torch.nn.functional as F
 
+if TYPE_CHECKING:  # imported for type hints only (avoids import cycles)
+    from .dataset import Vocabulary
+    from .model import ImageCaptioningModel
 
-def _clamp_len(model, max_length: int) -> int:
+AttentionMaps = List[torch.Tensor]
+
+
+def _clamp_len(model: "ImageCaptioningModel", max_length: int) -> int:
     return min(max_length, model.decoder.max_seq_length - 1)
 
 
-def _memory(model, images, backbone_features, device):
+def _memory(model: "ImageCaptioningModel", images: Optional[torch.Tensor],
+            backbone_features: Optional[torch.Tensor], device: Any) -> torch.Tensor:
     if backbone_features is not None:
         return model.encode(backbone_features=backbone_features.to(device))
     return model.encode(images.to(device))
 
 
 @torch.no_grad()
-def greedy_decode(model, images: Optional[torch.Tensor], vocab, max_length: int = 30,
-                  device="cpu", return_attention: bool = False, backbone_features=None):
+def greedy_decode(model: "ImageCaptioningModel", images: Optional[torch.Tensor], vocab: "Vocabulary",
+                  max_length: int = 30, device: Any = "cpu", return_attention: bool = False,
+                  backbone_features: Optional[torch.Tensor] = None
+                  ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
     """Decode a batch. Returns ``(ids (B, L) incl. <start>, attentions or None)``.
 
     ``attentions`` has shape (B, L-1, 49): one spatial map per generated token.
@@ -65,9 +74,10 @@ def greedy_decode(model, images: Optional[torch.Tensor], vocab, max_length: int 
 
 
 @torch.no_grad()
-def beam_search_batch(model, images: Optional[torch.Tensor], vocab, beam_size: int = 3,
-                      max_length: int = 30, length_penalty: float = 0.7, device="cpu",
-                      backbone_features=None) -> Tuple[List[List[int]], List[float]]:
+def beam_search_batch(model: "ImageCaptioningModel", images: Optional[torch.Tensor],
+                      vocab: "Vocabulary", beam_size: int = 3, max_length: int = 30,
+                      length_penalty: float = 0.7, device: Any = "cpu",
+                      backbone_features: Optional[torch.Tensor] = None) -> Tuple[List[List[int]], List[float]]:
     """Beam search for a BATCH of images: all B x k hypotheses run as one batch
     and share a KV-cache that is re-ordered whenever beams are re-ranked."""
     model.eval()
@@ -111,8 +121,9 @@ def beam_search_batch(model, images: Optional[torch.Tensor], vocab, beam_size: i
 
 
 @torch.no_grad()
-def beam_search(model, image: torch.Tensor, vocab, beam_size: int = 3, max_length: int = 30,
-                length_penalty: float = 0.7, device="cpu", backbone_features=None
+def beam_search(model: "ImageCaptioningModel", image: Optional[torch.Tensor], vocab: "Vocabulary",
+                beam_size: int = 3, max_length: int = 30, length_penalty: float = 0.7,
+                device: Any = "cpu", backbone_features: Optional[torch.Tensor] = None
                 ) -> Tuple[List[int], float]:
     """Beam search for ONE image."""
     ids, scores = beam_search_batch(model, image[:1] if image is not None else None, vocab,
@@ -121,7 +132,8 @@ def beam_search(model, image: torch.Tensor, vocab, beam_size: int = 3, max_lengt
     return ids[0], scores[0]
 
 
-def ids_to_words(ids, vocab, keep_special: bool = False) -> List[str]:
+def ids_to_words(ids: List[int], vocab: "Vocabulary", keep_special: bool = False) -> List[str]:
+    """Ids -> words. ``keep_special`` keeps <start>/<end> (needed for attention plots)."""
     if keep_special:
         words = []
         for i in ids:
@@ -138,7 +150,9 @@ def ids_to_words(ids, vocab, keep_special: bool = False) -> List[str]:
 # --------------------------------------------------------------------------- #
 # Backwards-compatible single-image helpers (used by app.py and the notebook)
 # --------------------------------------------------------------------------- #
-def generate_caption_greedy(model, image, vocab, max_length=30, device="cpu"):
+def generate_caption_greedy(model: "ImageCaptioningModel", image: torch.Tensor, vocab: "Vocabulary",
+                            max_length: int = 30, device: Any = "cpu"
+                            ) -> Tuple[List[str], AttentionMaps]:
     """Returns ``(words incl. <start>/<end>, [attention (49,) per generated word])``."""
     seqs, attn = greedy_decode(model, image, vocab, max_length, device, return_attention=True)
     words = ids_to_words(seqs[0].tolist(), vocab, keep_special=True)
@@ -146,8 +160,10 @@ def generate_caption_greedy(model, image, vocab, max_length=30, device="cpu"):
     return words, [attn[0, t].cpu() for t in range(n_generated)]
 
 
-def generate_caption_beam_search(model, image, vocab, max_length=30, beam_size=3, device="cpu",
-                                 return_attention: bool = False):
+def generate_caption_beam_search(model: "ImageCaptioningModel", image: torch.Tensor,
+                                 vocab: "Vocabulary", max_length: int = 30, beam_size: int = 3,
+                                 device: Any = "cpu", return_attention: bool = False):
+    """Beam search for one image; returns words (and attention maps if requested)."""
     ids, _ = beam_search(model, image, vocab, beam_size, max_length, device=device)
     words = ids_to_words(ids, vocab, keep_special=True)
     if not return_attention:

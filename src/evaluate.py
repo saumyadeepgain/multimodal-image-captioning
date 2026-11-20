@@ -16,8 +16,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import time
-from typing import Dict, List
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
 import torch
 from nltk.translate.bleu_score import SmoothingFunction, corpus_bleu
@@ -27,6 +28,10 @@ from tqdm import tqdm
 from .dataset import tokenize
 from .inference import beam_search_batch, greedy_decode
 from .metrics import cider_d, rouge_l
+
+if TYPE_CHECKING:
+    from .dataset import ImageDataset, Vocabulary
+    from .model import ImageCaptioningModel
 
 
 def bleu_scores(hypotheses: List[List[str]], references: List[List[List[str]]]) -> Dict[str, float]:
@@ -54,21 +59,28 @@ def coco_scores(hypotheses: List[List[str]], references: List[List[List[str]]],
 
 
 @torch.no_grad()
-def evaluate_captions(model, image_dataset, vocab, device="cpu", beam_size: int = 1,
+def evaluate_captions(model: "ImageCaptioningModel", image_dataset: "ImageDataset",
+                      vocab: "Vocabulary", device: Any = "cpu", beam_size: int = 1,
                       max_length: int = 30, batch_size: int = 64, num_workers: int = 2,
-                      limit: int = 0, feature_bank=None, meteor: bool = False):
-    """Caption every image in an ``ImageDataset`` and score against all refs."""
+                      limit: int = 0,
+                      feature_bank: Optional[Tuple[torch.Tensor, Dict[str, int]]] = None,
+                      meteor: bool = False,
+                      length_penalty: float = 0.7) -> Tuple[Dict[str, float], List[Dict[str, Any]]]:
+    """Caption the first ``limit`` (or all) images of an ``ImageDataset`` and return
+    ``(metrics, sample predictions)``. ``feature_bank`` = cached backbone features."""
     model.eval()
     n = len(image_dataset) if not limit else min(limit, len(image_dataset))
     subset = torch.utils.data.Subset(image_dataset, range(n))
     hyps: List[List[str]] = [None] * n  # type: ignore
     start = time.perf_counter()
-    def decode(imgs=None, feats=None):
+
+    def decode(imgs: Optional[torch.Tensor] = None,
+               feats: Optional[torch.Tensor] = None) -> List[List[int]]:
         if beam_size <= 1:
             seqs, _ = greedy_decode(model, imgs, vocab, max_length, device, backbone_features=feats)
             return seqs.tolist()
-        ids, _ = beam_search_batch(model, imgs, vocab, beam_size, max_length, device=device,
-                                   backbone_features=feats)
+        ids, _ = beam_search_batch(model, imgs, vocab, beam_size, max_length, length_penalty,
+                                   device=device, backbone_features=feats)
         return ids
 
     if feature_bank is not None:
@@ -93,35 +105,45 @@ def evaluate_captions(model, image_dataset, vocab, device="cpu", beam_size: int 
     return metrics, samples
 
 
-def main():
-    from .checkpoint import load_checkpoint
-    from .dataset import build_datasets
+def main() -> None:
+    from .config import Config
+    from .dataset import build_datasets_from_config
+    from .utils import get_device, load_checkpoint
 
-    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap = argparse.ArgumentParser(description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--checkpoint", default="checkpoints/best_model.pth")
-    ap.add_argument("--img-dir", default="data/archive/Images")
-    ap.add_argument("--captions", default="data/archive/captions.txt")
+    ap.add_argument("--img-dir", default=None, help="override the image dir stored in the checkpoint")
+    ap.add_argument("--captions", default=None, help="override the captions file in the checkpoint")
     ap.add_argument("--split", choices=["val", "test"], default="test")
-    ap.add_argument("--beam", type=int, default=3)
-    ap.add_argument("--max-length", type=int, default=30)
+    ap.add_argument("--beam", type=int, default=None, help="default: eval.beam_size from config")
+    ap.add_argument("--max-length", type=int, default=None)
     ap.add_argument("--meteor", action="store_true", help="also compute METEOR (needs Java)")
     ap.add_argument("--limit", type=int, default=0, help="evaluate only the first N images")
     ap.add_argument("--out", default="checkpoints/eval_results.json")
     args = ap.parse_args()
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = get_device()
     model, vocab, meta = load_checkpoint(args.checkpoint, device)
-    cfg = meta.get("data", {})
-    datasets, _ = build_datasets(args.img_dir, args.captions,
-                                 freq_threshold=cfg.get("freq_threshold", 5),
-                                 seed=cfg.get("seed", 42))
+    # Rebuild EXACTLY the split used in training from the config saved in the checkpoint.
+    cfg = Config.from_dict(meta.get("config", {}))
+    if args.img_dir:
+        cfg.data.img_dir = args.img_dir
+    if args.captions:
+        cfg.data.captions_file = args.captions
+    beam = args.beam if args.beam is not None else cfg.eval.beam_size
+    max_len = args.max_length or cfg.eval.max_length
+    datasets, _ = build_datasets_from_config(cfg.data, cfg.seed, augment=False)
     metrics, samples = evaluate_captions(model, datasets[f"{args.split}_images"], vocab, device,
-                                         beam_size=args.beam, max_length=args.max_length,
-                                         limit=args.limit, meteor=args.meteor)
+                                         beam_size=beam, max_length=max_len,
+                                         batch_size=cfg.eval.batch_size, limit=args.limit,
+                                         meteor=args.meteor or cfg.eval.meteor,
+                                         length_penalty=cfg.eval.length_penalty)
     print(json.dumps(metrics, indent=2))
+    os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
     with open(args.out, "w") as f:
-        json.dump({"split": args.split, "beam": args.beam, "metrics": metrics,
-                   "samples": samples}, f, indent=2)
+        json.dump({"split": args.split, "beam": beam, "checkpoint": args.checkpoint,
+                   "metrics": metrics, "samples": samples}, f, indent=2)
     print(f"Saved -> {args.out}")
 
 
