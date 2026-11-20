@@ -1,6 +1,6 @@
 # Core (training / inference)
-torch>=2.1
-torchvision>=0.16
+torch>=2.3            # torch.amp.GradScaler('cuda') needs >= 2.3
+torchvision>=0.18
 Pillow>=9.0
 numpy>=1.24
 nltk>=3.8          # only corpus_bleu is used; no tokenizer downloads needed

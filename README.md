@@ -24,7 +24,7 @@
 | **Decoder** | Pre-LN Transformer: causal self-attention + cross-attention over the 7×7 = 49 image regions |
 | **Decoding** | KV-cached greedy and batched beam search (GNMT length penalty), both return attention maps |
 | **Metrics** | Corpus BLEU-1…4, CIDEr-D, ROUGE-L against all 5 references (built in, verified against `pycocoevalcap`); optional METEOR |
-| **Engineering** | Validated YAML/dataclass config with a CLI flag per key, CNN-feature cache, AMP + GradScaler, warm-up/cosine LR, early stopping, gradient accumulation, exact resume, CUDA-OOM recovery, TensorBoard / W&B, 39 tests + CI |
+| **Engineering** | Validated YAML/dataclass config with a CLI flag per key, CNN-feature cache, AMP + GradScaler, warm-up/cosine LR, early stopping, gradient accumulation, exact resume, CUDA-OOM recovery, TensorBoard / W&B, 82 tests + CI (ruff, pytest) |
 
 > Reference: Xu et al., *Show, Attend and Tell* (2015) — [arXiv:1502.03044](https://arxiv.org/abs/1502.03044)
 
@@ -73,7 +73,7 @@ LayerNorm → Linear → next-token logits (raw logits → CrossEntropyLoss)
 │   ├── attention_viz.py      # attention overlays + attention entropy
 │   ├── tracking.py           # optional TensorBoard / Weights & Biases tracker
 │   └── utils.py              # seeding, device selection, logging, OOM helpers, checkpoints
-├── tests/                    # pytest: pipeline, metrics, training/resume (CPU, synthetic data)
+├── tests/                    # pytest suite: model, overfit, dataset, training, CLI, ... (CPU)
 ├── notebooks/
 │   └── image_captioning.ipynb   # EDA, diagnostics, evaluation, attention plots
 ├── docs/
@@ -83,7 +83,7 @@ LayerNorm → Linear → next-token logits (raw logits → CrossEntropyLoss)
 ├── app.py                    # Gradio demo
 ├── pyproject.toml            # package metadata, extras, console scripts, pytest config
 ├── requirements.txt / requirements-dev.txt
-└── .github/workflows/tests.yml
+└── .github/workflows/ci.yml  # ruff + pytest on every push / PR
 ```
 
 Generated at run time (git-ignored): `data/`, `checkpoints/` (`best_model.pth`, `last.pth`,
@@ -210,19 +210,33 @@ evaluation and attention plots, and automatically uses `history.json` / the trai
 
 ---
 
-## 🧪 Tests
+## 🧪 Tests & CI
 
 ```bash
-pip install -r requirements-dev.txt
-pytest
+pip install -r requirements-dev.txt     # pytest, pytest-cov, ruff (pinned)
+ruff check .                            # lint
+ruff format --check .                   # formatting
+pytest                                  # 82 tests, CPU only, ~45 s
+pytest --cov=src --cov-report=term-missing
 ```
 
-39 tests run on CPU in ~30 s with a random-init backbone and synthetic data: no split leakage,
-caption parsing, frozen-BatchNorm behaviour (frozen and fine-tuned), padding invariance,
-KV-cache = full forward, batched = per-image beam search, CIDEr-D/ROUGE-L = `pycocoevalcap`,
-initial loss ≈ log V, gradient accumulation = large batch, bit-exact resume, CLI flag parsing
-and validation, script mode, device fallback, TensorBoard / W&B trackers, OOM micro-batching =
-full batch, missing / corrupted images, error messages, and an end-to-end run from a config. GitHub Actions runs them on every push.
+Everything runs on CPU with synthetic images and a randomly initialised backbone — no dataset,
+GPU or network needed.
+
+| File | What it proves |
+|---|---|
+| `tests/test_model.py` | construction, exact output shapes (`[B,T-1,V]`, `[B,T-1,S]`, `[B,S,E]`), finite loss, gradients reach **every** trainable parameter and no frozen one, dropout/eval behaviour, bf16 autocast |
+| `tests/test_overfit_batch.py` | the real training loop memorises one batch: loss falls by > 95 % in 50 steps and greedy decoding reproduces the captions exactly (also end-to-end through ResNet-50) |
+| `tests/test_dataset.py` | transform shapes, exact ImageNet-normalisation values and ranges, deterministic eval / random train transforms, train-only vocabulary, collate padding, loader shapes, feature-cache alignment |
+| `tests/test_pipeline.py` | split without leakage, frozen BatchNorm, padding invariance, KV-cache = full forward, batched = per-image beam search |
+| `tests/test_training.py` | config overrides, bit-exact resume, gradient accumulation = large batch, end-to-end run |
+| `tests/test_hardening.py` | CLI flags and validation, script mode, device fallback, TensorBoard / W&B, OOM micro-batching, corrupted / missing images, error messages |
+| `tests/test_metrics.py` | CIDEr-D and ROUGE-L match `pycocoevalcap` exactly |
+| `tests/test_cli.py` | `train` / `evaluate` / `predict` entry points and attention plots on a real checkpoint |
+
+**CI** (`.github/workflows/ci.yml`) runs on every push and pull request: a `ruff check` +
+`ruff format --check` job, and the full test suite with coverage on CPU-only PyTorch for
+Python 3.9 and 3.12 (coverage and JUnit reports are uploaded as artifacts).
 
 ---
 
