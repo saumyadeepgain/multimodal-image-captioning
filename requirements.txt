@@ -11,6 +11,8 @@ PyYAML>=6.0         # configs/*.yaml
 # Optional extras
 pycocoevalcap>=1.2  # only for --meteor (needs Java); CIDEr/ROUGE-L are built in
 gradio>=4.0         # app.py demo
+tensorboard>=2.14   # tracking.backend: tensorboard
+wandb>=0.16         # tracking.backend: wandb
 
 # Notebook / EDA
 pandas>=2.0

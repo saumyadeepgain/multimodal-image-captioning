@@ -110,5 +110,7 @@ def test_run_from_config_writes_artifacts(tiny_flickr, tmp_path):
                              f"train.out_dir={str(tmp_path / 'run')!r}"])
     hist = run(cfg)
     assert len(hist["train_loss"]) == 2 and hist["val_cider"][0] is not None
-    for f in ("best_model.pth", "last.pth", "history.json", "config.yaml", "train.log"):
+    for f in ("best_model.pth", "last.pth", "history.json", "config.yaml"):
         assert (tmp_path / "run" / f).exists(), f
+    logs = list((tmp_path / "run" / "logs").glob("train_*.log"))
+    assert len(logs) == 1 and "Epoch 02/2" in logs[0].read_text()

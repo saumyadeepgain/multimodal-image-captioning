@@ -24,7 +24,7 @@
 | **Decoder** | Pre-LN Transformer: causal self-attention + cross-attention over the 7×7 = 49 image regions |
 | **Decoding** | KV-cached greedy and batched beam search (GNMT length penalty), both return attention maps |
 | **Metrics** | Corpus BLEU-1…4, CIDEr-D, ROUGE-L against all 5 references (built in, verified against `pycocoevalcap`); optional METEOR |
-| **Engineering** | YAML/dataclass config, CNN-feature cache, AMP, gradient accumulation, exact resume, 20 tests + CI |
+| **Engineering** | Validated YAML/dataclass config with a CLI flag per key, CNN-feature cache, AMP + GradScaler, warm-up/cosine LR, early stopping, gradient accumulation, exact resume, CUDA-OOM recovery, TensorBoard / W&B, 39 tests + CI |
 
 > Reference: Xu et al., *Show, Attend and Tell* (2015) — [arXiv:1502.03044](https://arxiv.org/abs/1502.03044)
 
@@ -71,7 +71,8 @@ LayerNorm → Linear → next-token logits (raw logits → CrossEntropyLoss)
 │   ├── metrics.py            # dependency-free CIDEr-D and ROUGE-L
 │   ├── predict.py            # caption image files from the command line
 │   ├── attention_viz.py      # attention overlays + attention entropy
-│   └── utils.py              # seeding, device, logging, checkpoint save/load
+│   ├── tracking.py           # optional TensorBoard / Weights & Biases tracker
+│   └── utils.py              # seeding, device selection, logging, OOM helpers, checkpoints
 ├── tests/                    # pytest: pipeline, metrics, training/resume (CPU, synthetic data)
 ├── notebooks/
 │   └── image_captioning.ipynb   # EDA, diagnostics, evaluation, attention plots
@@ -86,7 +87,7 @@ LayerNorm → Linear → next-token logits (raw logits → CrossEntropyLoss)
 ```
 
 Generated at run time (git-ignored): `data/`, `checkpoints/` (`best_model.pth`, `last.pth`,
-`config.yaml`, `history.json`, `train.log`, `eval_results.json`).
+`config.yaml`, `history.json`, `logs/train_<timestamp>.log`, `tensorboard/`, `eval_results.json`).
 
 ---
 
@@ -111,38 +112,84 @@ data/archive/captions.txt   ← "image,caption" (the original Flickr8k.token.txt
 ## 🚀 Training
 
 ```bash
-python -m src.train                                   # built-in defaults = configs/default.yaml
-python -m src.train --config configs/default.yaml --set train.epochs=30 train.lr=1e-4
+python src/train.py                                     # defaults (= configs/default.yaml)
+python src/train.py --config configs/default.yaml --lr 1e-4 --batch_size 32 --epochs 30
+python -m src.train --train.lr 1e-4 --model.num_layers 4   # fully-qualified flags also work
 ```
 
-Every hyper-parameter lives in `configs/default.yaml` (typed in `src/config.py`); override any
-of them with `--set section.key=value`. Useful ones:
+**Every key in `configs/default.yaml` is a command-line flag**, by its short name when
+unambiguous (`--lr`, `--epochs`, `--amp false`, `--tie_weights`) or fully qualified
+(`--eval.batch_size 16`). Short names that exist in several sections resolve by priority
+train > model > data > eval > tracking, so `--batch_size` means `train.batch_size`.
+Precedence: defaults < `--config` file < flags < `--set key=value`. Values are type-checked
+(`--lr abc` and `--epochs 2.5` are rejected) and the whole config is validated (e.g.
+`embed_size` must be divisible by `nhead`) before anything is loaded.
 
-| Override | Effect |
+| Flag | Effect |
 |---|---|
-| `model.train_CNN=true` | fine-tune ResNet layer4 (disables feature caching, enables augmentation) |
-| `train.grad_accum_steps=4` | effective batch = `batch_size × 4` with the memory of one batch |
-| `train.select_metric=CIDEr` | choose the best checkpoint by val CIDEr (`BLEU-4`, `CIDEr` or `val_loss`) |
-| `train.bleu_limit=500` | decode only 500 val images per epoch for model selection (faster) |
-| `train.stop_after_epochs=5` | stop this process after 5 epochs (time-limited jobs) |
-| `train.resume=checkpoints/last.pth` | continue exactly where a run stopped |
-| `deterministic=true` | deterministic cuDNN kernels for bit-exact reruns |
+| `--train_CNN` | fine-tune ResNet layer4 (disables feature caching, enables augmentation) |
+| `--grad_accum_steps 4` | effective batch = `batch_size × 4` with the memory of one batch |
+| `--select_metric CIDEr` | choose the best checkpoint by val CIDEr (`BLEU-4`, `CIDEr` or `val_loss`) |
+| `--patience 5 --min_delta 0.001` | early stopping |
+| `--warmup_ratio 0.05 --min_lr_ratio 0.05` | linear warm-up, then cosine annealing to 5 % of the LR |
+| `--amp true` | bf16 autocast, or fp16 + `GradScaler` on GPUs without bf16 (CUDA only) |
+| `--max_grad_norm 1.0` | gradient-norm clipping (applied after un-scaling under AMP) |
+| `--resume checkpoints/last.pth` | continue exactly where a run stopped |
+| `--stop_after_epochs 5` | stop this process after 5 epochs (time-limited jobs) |
+| `--backend tensorboard` / `--backend wandb` | experiment tracking (see below) |
+| `--device auto` | `cuda` > `mps` > `cpu`; an unavailable explicit device falls back with a warning |
+| `--deterministic true` | deterministic cuDNN kernels for bit-exact reruns |
 
 With the default frozen encoder, ResNet-50 features are computed **once per image** and cached
 (fp16, ≈1.2 GB RAM for the train split), so every epoch only runs the decoder.
 
-**Outputs** in `train.out_dir` (default `checkpoints/`):
+**Outputs** in `--out_dir` (default `checkpoints/`):
 `best_model.pth` (weights + model config + vocabulary + full experiment config),
-`last.pth` (adds optimizer, scheduler, AMP scaler and RNG states for exact resume),
-`config.yaml`, `history.json` (loss, perplexity, BLEU-4, CIDEr, LR, grad-norm, time per epoch)
-and `train.log`.
+`last.pth` (adds optimizer, scheduler, AMP scaler, RNG states, best metric, patience counter,
+global step and epoch), `config.yaml`, `history.json` and `logs/train_<timestamp>.log`.
 
-**Resuming** is bit-exact: an interrupted and resumed run produces the same weights as an
-uninterrupted one (tested in `tests/test_training.py`).
+**Resuming** restores all of the above and is bit-exact: an interrupted and resumed run
+produces the same weights as an uninterrupted one (tested). Resuming with the saved
+`config.yaml` also continues the same TensorBoard / W&B run.
 
 ```bash
-python -m src.train --config checkpoints/config.yaml --set train.resume=checkpoints/last.pth
+python src/train.py --config checkpoints/config.yaml --resume checkpoints/last.pth
 ```
+
+### Logging and experiment tracking
+
+All messages go through Python `logging` to the console **and** a timestamped file
+(`<out_dir>/logs/train_<YYYYmmdd-HHMMSS>.log`). Optional tracking is toggled in the config:
+
+```yaml
+tracking:
+  backend: tensorboard     # none | tensorboard | wandb
+  project: image-captioning
+  log_every_n_steps: 50    # step-level loss / LR / grad-norm
+  wandb_mode: online       # online | offline | disabled
+```
+
+```bash
+pip install tensorboard && python src/train.py --backend tensorboard
+tensorboard --logdir checkpoints/tensorboard
+pip install wandb && python src/train.py --backend wandb --project my-captioning
+```
+
+Epoch-level train/val loss, perplexity, BLEU-4, CIDEr, LR, gradient norm, epoch time and five
+sample captions are logged. If the package is missing or W&B cannot start, training continues
+with a warning.
+
+### Robustness
+
+| Situation | Behaviour |
+|---|---|
+| Missing image folder / captions file / checkpoint | clear error message, exit code 1 |
+| Missing or corrupted images (`--verify_images true`, default) | checked once up front, dropped, summary logged |
+| Image becomes unreadable during training | logged once, the next sample is used (its own caption comes with it) |
+| CUDA out of memory in training | batch retried as 2×, 4×, … micro-batches with the exact same gradient, up to `--max_oom_splits` |
+| CUDA out of memory in validation / decoding / feature caching | batch split in halves recursively |
+| Ctrl-C | message with the exact `--resume` command; `last.pth` holds the last finished epoch |
+| Resuming from `best_model.pth` or a mismatched config | explanatory error instead of a stack trace |
 
 ---
 
@@ -170,11 +217,12 @@ pip install -r requirements-dev.txt
 pytest
 ```
 
-20 tests run on CPU in ~11 s with a random-init backbone and synthetic data: no split leakage,
+39 tests run on CPU in ~30 s with a random-init backbone and synthetic data: no split leakage,
 caption parsing, frozen-BatchNorm behaviour (frozen and fine-tuned), padding invariance,
 KV-cache = full forward, batched = per-image beam search, CIDEr-D/ROUGE-L = `pycocoevalcap`,
-initial loss ≈ log V, gradient accumulation = large batch, bit-exact resume, and an end-to-end
-run from a config. GitHub Actions runs them on every push.
+initial loss ≈ log V, gradient accumulation = large batch, bit-exact resume, CLI flag parsing
+and validation, script mode, device fallback, TensorBoard / W&B trackers, OOM micro-batching =
+full batch, missing / corrupted images, error messages, and an end-to-end run from a config. GitHub Actions runs them on every push.
 
 ---
 
