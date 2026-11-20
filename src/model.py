@@ -9,16 +9,24 @@ Changes compared with the first version (details in docs/IMPROVEMENTS.pdf):
 * **No autograd graph for a frozen backbone** (``torch.no_grad``), which cuts
   activation memory and backward time.
 * **Spatial position embeddings** for the 7x7 grid. Cross-attention is
-  permutation invariant, so without them the decoder only knows *what* is in
-  each region, not *where* the region is.
+  permutation invariant, so in principle the decoder cannot tell regions apart
+  by location. NOTE: in our synthetic ablation (docs/ablation_results.json) this
+  made no measurable difference -- ResNet features already leak position via
+  zero padding -- but it costs only 49*d parameters, so it is kept.
 * **Pre-LayerNorm** decoder layers + GELU: more stable to train without long
   warm-up than the post-LN layout.
 * **Key padding mask** on decoder self-attention, and a cached boolean
   causal mask (the old code rebuilt a float mask on every forward).
 * **Attention weights only when asked for** (``need_weights``), letting
   PyTorch use the fused scaled-dot-product kernel during training.
-* **Weight tying** between the token embedding and output projection
-  (fewer parameters, usually better perplexity on small datasets).
+* **Scaled embedding init** N(0, d^-0.5). Optional weight tying
+  (``tie_weights=True``, with T5-style d^-0.5 output scaling) is available but
+  OFF by default: in a controlled ablation (docs/ablation_results.json) the
+  untied output layer reached a clearly lower validation loss.
+* **KV-cache for generation** (``init_cache`` / ``step``): each new token
+  attends to cached keys/values instead of re-running the whole prefix, so
+  generating T tokens costs O(T) decoder passes of length 1 instead of
+  O(T^2) work; image keys/values are projected once per caption.
 """
 
 from __future__ import annotations
@@ -28,6 +36,7 @@ from typing import Optional
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import torchvision.models as models
 
 BACKBONE_DIM = 2048
@@ -128,11 +137,53 @@ class CustomTransformerDecoderLayer(nn.Module):
         tgt = tgt + self.dropout3(self.ff(self.norm3(tgt)))
         return tgt, weights
 
+    # ----------------------------------------------------------- KV-cache path
+    @staticmethod
+    def _heads(x, nhead):
+        B, T, E = x.shape
+        return x.view(B, T, nhead, E // nhead).transpose(1, 2)  # (B, H, T, Dh)
+
+    def project_memory(self, memory):
+        """Cross-attention keys/values for the image, computed once."""
+        mha = self.multihead_attn
+        E = memory.size(-1)
+        w, b = mha.in_proj_weight, mha.in_proj_bias
+        k = F.linear(memory, w[E:2 * E], b[E:2 * E])
+        v = F.linear(memory, w[2 * E:], b[2 * E:])
+        return self._heads(k, mha.num_heads), self._heads(v, mha.num_heads)
+
+    def step(self, x, cache, need_weights: bool = False):
+        """One token (B, 1, E) using/extending ``cache`` (eval mode only)."""
+        sa_mha, ca_mha = self.self_attn, self.multihead_attn
+        H = sa_mha.num_heads
+        h = self.norm1(x)
+        q, k, v = F.linear(h, sa_mha.in_proj_weight, sa_mha.in_proj_bias).chunk(3, dim=-1)
+        q, k, v = self._heads(q, H), self._heads(k, H), self._heads(v, H)
+        cache["k"] = k if cache.get("k") is None else torch.cat([cache["k"], k], 2)
+        cache["v"] = v if cache.get("v") is None else torch.cat([cache["v"], v], 2)
+        a = F.scaled_dot_product_attention(q, cache["k"], cache["v"])  # past only: no mask
+        x = x + sa_mha.out_proj(a.transpose(1, 2).flatten(2))
+
+        h = self.norm2(x)
+        E = h.size(-1)
+        q = self._heads(F.linear(h, ca_mha.in_proj_weight[:E], ca_mha.in_proj_bias[:E]), H)
+        weights = None
+        if need_weights:
+            scores = (q @ cache["mk"].transpose(-1, -2)) / math.sqrt(q.size(-1))
+            p = scores.softmax(-1)
+            a = p @ cache["mv"]
+            weights = p.mean(1)  # (B, 1, S) averaged over heads, like nn.MultiheadAttention
+        else:
+            a = F.scaled_dot_product_attention(q, cache["mk"], cache["mv"])
+        x = x + ca_mha.out_proj(a.transpose(1, 2).flatten(2))
+        x = x + self.ff(self.norm3(x))
+        return x, weights
+
 
 class DecoderTransformer(nn.Module):
     def __init__(self, embed_size: int, vocab_size: int, num_layers: int = 3, nhead: int = 8,
                  max_seq_length: int = 64, dropout: float = 0.1, dim_feedforward: Optional[int] = None,
-                 pad_idx: int = 0, tie_weights: bool = True):
+                 pad_idx: int = 0, tie_weights: bool = False):
         super().__init__()
         self.embed = nn.Embedding(vocab_size, embed_size, padding_idx=pad_idx)
         self.pos_encoder = PositionalEncoding(embed_size, max_seq_length)
@@ -145,6 +196,17 @@ class DecoderTransformer(nn.Module):
         self.fc_out = nn.Linear(embed_size, vocab_size)
         if tie_weights:
             self.fc_out.weight = self.embed.weight
+        # Scaled init: with tied weights the default N(0, 1) embedding makes the
+        # initial logits have std ~sqrt(d) (loss far above log|V|). N(0, d^-0.5)
+        # gives unit-scale inputs after the sqrt(d) multiplier and sane logits.
+        nn.init.normal_(self.embed.weight, mean=0.0, std=embed_size ** -0.5)
+        with torch.no_grad():
+            self.embed.weight[pad_idx].zero_()
+        nn.init.zeros_(self.fc_out.bias)
+        # As in T5: with tied weights, rescale the decoder output by d^-0.5,
+        # otherwise each position's own input embedding (still in the residual
+        # stream) yields a logit of ~sqrt(d) for "repeat the current word".
+        self.out_scale = embed_size ** -0.5 if tie_weights else 1.0
         self.max_seq_length = max_seq_length
         self.embed_size = embed_size
         self.pad_idx = pad_idx
@@ -171,14 +233,46 @@ class DecoderTransformer(nn.Module):
                          need_weights=return_attention and last)
             if w is not None:
                 attn = w
-        out = self.fc_out(self.final_norm(x))
+        out = self.fc_out(self.final_norm(x) * self.out_scale)
         return (out, attn) if return_attention else out
+
+    def init_cache(self, memory):
+        """Per-layer cache with pre-projected image keys/values."""
+        caches = []
+        for layer in self.layers:
+            mk, mv = layer.project_memory(memory)
+            caches.append({"mk": mk, "mv": mv, "k": None, "v": None})
+        return caches
+
+    @staticmethod
+    def reorder_cache(caches, index):
+        """Select batch rows (used by beam search when beams are re-ranked)."""
+        for c in caches:
+            for key in ("mk", "mv", "k", "v"):
+                if c[key] is not None:
+                    c[key] = c[key].index_select(0, index)
+        return caches
+
+    def step(self, tokens, position: int, caches, return_attention: bool = False):
+        """Logits for the next token given the last tokens (B,) at ``position``."""
+        if position >= self.max_seq_length:
+            raise ValueError(f"position {position} exceeds max_len {self.max_seq_length}")
+        x = self.embed(tokens[:, None]) * math.sqrt(self.embed_size)
+        x = x + self.pos_encoder.pe[:, position:position + 1]
+        attn = None
+        for i, (layer, cache) in enumerate(zip(self.layers, caches)):
+            last = i == len(self.layers) - 1
+            x, w = layer.step(x, cache, need_weights=return_attention and last)
+            if w is not None:
+                attn = w[:, 0]
+        logits = self.fc_out(self.final_norm(x) * self.out_scale)[:, 0]
+        return (logits, attn) if return_attention else logits
 
 
 class ImageCaptioningModel(nn.Module):
     def __init__(self, embed_size: int, vocab_size: int, num_layers: int = 3, nhead: int = 8,
                  train_CNN: bool = False, pretrained: bool = True, dropout: float = 0.1,
-                 max_seq_length: int = 64, pad_idx: int = 0, tie_weights: bool = True):
+                 max_seq_length: int = 64, pad_idx: int = 0, tie_weights: bool = False):
         super().__init__()
         self.config = dict(embed_size=embed_size, vocab_size=vocab_size, num_layers=num_layers,
                            nhead=nhead, train_CNN=train_CNN, dropout=dropout,

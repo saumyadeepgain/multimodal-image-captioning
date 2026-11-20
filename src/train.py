@@ -195,6 +195,8 @@ def main():
     ap.add_argument("--layers", type=int, default=3)
     ap.add_argument("--heads", type=int, default=8)
     ap.add_argument("--dropout", type=float, default=0.1)
+    ap.add_argument("--tie-weights", action="store_true",
+                    help="tie embedding and output weights (off by default, see docs)")
     ap.add_argument("--freq-threshold", type=int, default=5)
     ap.add_argument("--fine-tune-cnn", action="store_true", help="also train ResNet layer4")
     ap.add_argument("--no-cache", action="store_true", help="disable CNN feature caching")
@@ -217,7 +219,7 @@ def main():
 
     model = ImageCaptioningModel(args.embed_size, len(vocab), args.layers, args.heads,
                                  train_CNN=args.fine_tune_cnn, dropout=args.dropout,
-                                 pad_idx=vocab.pad_idx,
+                                 pad_idx=vocab.pad_idx, tie_weights=args.tie_weights,
                                  pretrained=not args.no_pretrained).to(device)
     pad = vocab.pad_idx
     if cached:
