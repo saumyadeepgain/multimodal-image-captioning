@@ -1,6 +1,8 @@
 """Shared fixtures. Everything runs on CPU with synthetic data and a
 randomly initialised backbone, so the suite needs no dataset, GPU or network."""
 
+import contextlib
+import logging
 import os
 import random
 import sys
@@ -29,6 +31,35 @@ def _make_flickr(root):
     cap_file = root / "captions.txt"
     cap_file.write_text("\n".join(lines))
     return str(img_dir), str(cap_file)
+
+
+@pytest.fixture
+def capture_logs(caplog):
+    """``with capture_logs(): ...`` records the project logger into ``caplog``.
+
+    Once ``utils.get_logger`` has configured the "captioning" logger (any CLI or
+    training test does), it stops propagating to the root logger. pytest 8, the
+    newest release for Python 3.9, captures only through the root logger, so a plain
+    ``caplog.at_level`` saw nothing after such a test had run; pytest 9 also attaches
+    to loggers that are already non-propagating. Attaching the handler of the running
+    test phase directly works with both versions and in any test order.
+    """
+
+    @contextlib.contextmanager
+    def capture(level=logging.WARNING, name="captioning"):
+        logger = logging.getLogger(name)
+        handler = caplog.handler  # belongs to the phase that is running now
+        attach = handler not in logger.handlers  # pytest 9 may have attached it already
+        if attach:
+            logger.addHandler(handler)
+        try:
+            with caplog.at_level(level, logger=name):
+                yield caplog
+        finally:
+            if attach:
+                logger.removeHandler(handler)
+
+    return capture
 
 
 @pytest.fixture

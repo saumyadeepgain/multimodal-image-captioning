@@ -99,10 +99,10 @@ def test_script_mode_help_runs():
 
 
 # ---------------------------------------------------------------------- device
-def test_device_fallback(caplog):
+def test_device_fallback(caplog, capture_logs):
     assert get_device("cpu").type == "cpu"
     if not torch.cuda.is_available():
-        with caplog.at_level(logging.WARNING, logger="captioning"):
+        with capture_logs(logging.WARNING):
             assert get_device("cuda").type in ("cpu", "mps")
         assert "not available" in caplog.text
     assert get_device("auto").type in ("cuda", "mps", "cpu")
@@ -216,18 +216,18 @@ def test_missing_paths_raise_clear_errors(tiny_flickr, tmp_path):
         load_captions(str(empty))
 
 
-def test_corrupt_and_missing_images_are_dropped(tiny_flickr, caplog):
+def test_corrupt_and_missing_images_are_dropped(tiny_flickr, caplog, capture_logs):
     img_dir, cap_file = tiny_flickr
     with open(os.path.join(img_dir, "img_0.jpg"), "wb") as f:
         f.write(b"not a jpeg")  # corrupted file
     os.remove(os.path.join(img_dir, "img_1.jpg"))  # missing file
-    with caplog.at_level(logging.WARNING, logger="captioning"):
+    with capture_logs(logging.WARNING):
         pairs = verify_image_pairs(img_dir, load_captions(cap_file))
     assert {i for i, _ in pairs} == {f"img_{k}.jpg" for k in range(2, 20)}
     assert "Dropping 2 of 20 images" in caplog.text
 
 
-def test_runtime_corruption_falls_back_to_next_sample(tiny_flickr, caplog):
+def test_runtime_corruption_falls_back_to_next_sample(tiny_flickr, caplog, capture_logs):
     img_dir, cap_file = tiny_flickr
     ds, _ = build_datasets(
         img_dir, cap_file, freq_threshold=1, val_frac=0.2, test_frac=0.2, image_size=64
@@ -236,7 +236,7 @@ def test_runtime_corruption_falls_back_to_next_sample(tiny_flickr, caplog):
     bad = train.imgs[0]
     with open(os.path.join(img_dir, bad), "wb") as f:
         f.write(b"\xff\xd8\xff garbage")  # truncated JPEG header
-    with caplog.at_level(logging.WARNING, logger="captioning"):
+    with capture_logs(logging.WARNING):
         img, cap = train[0]
     assert img.shape == (3, 64, 64)
     j = next(k for k, name in enumerate(train.imgs) if name != bad)
