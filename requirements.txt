@@ -6,6 +6,7 @@ numpy>=1.24
 nltk>=3.8          # only corpus_bleu is used; no tokenizer downloads needed
 tqdm>=4.65
 matplotlib>=3.7
+PyYAML>=6.0         # configs/*.yaml
 
 # Optional extras
 pycocoevalcap>=1.2  # only for --meteor (needs Java); CIDEr/ROUGE-L are built in

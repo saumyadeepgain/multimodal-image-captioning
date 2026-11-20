@@ -142,7 +142,7 @@ def build():
                           "smoothing, AdamW + warm-up/cosine, model selection on BLEU-4"],
         ["Honesty of results", "Mock numbers removed from README; notebook mock charts labelled; "
                                "real evaluation script (corpus BLEU vs all 5 references) added"],
-        ["Engineering", "CLI for train/evaluate/predict, built-in CIDEr-D/ROUGE-L, self-contained checkpoints, 15 unit tests, CI"],
+        ["Engineering", "CLI for train/evaluate/predict, built-in CIDEr-D/ROUGE-L, self-contained checkpoints, 20 tests, CI, YAML config, exact resume"],
     ], [3.5 * cm, 13.5 * cm]))
     s.append(PageBreak())
 
@@ -390,11 +390,11 @@ def build():
     s.append(P("6. How to reproduce", H1))
     s.append(Preformatted(
         "pip install -r requirements.txt\n"
-        "python -m src.train --epochs 20            # -> checkpoints/best_model.pth, history.json\n"
+        "python -m src.train --set train.epochs=20   # -> checkpoints/best_model.pth, last.pth\n"
         "python -m src.evaluate --split test --beam 3  # -> checkpoints/eval_results.json\n"
         "python app.py                              # Gradio demo\n"
         "python -m src.predict img.jpg --beam 3     # caption your own images\n"
-        "pytest -q                                  # 15 tests, CPU, synthetic data\n"
+        "pytest -q                                  # 20 tests, CPU, synthetic data\n"
         "python docs/build_report.py                # rebuild this PDF", CODE))
 
     s.append(P("7. Change log (commit order)", H1))
@@ -411,6 +411,8 @@ def build():
         ["9", "Round 2: fix tied-weight initialisation (found by a new test), untied output by default"],
         ["10", "Round 2: KV-cache decoding, batched beam search across images"],
         ["11", "Round 2: built-in CIDEr-D / ROUGE-L, METEOR opt-in, predict CLI, ablation + benchmarks"],
+        ["12", "Round 3: config system, utils (seeding, logging, safe checkpoints), exact resume, grad accumulation"],
+        ["13", "Round 3: fine-tune BatchNorm fix, type hints, pyproject, tests, README, report section 9"],
     ], [1.6 * cm, 15.4 * cm]))
 
     # ------------------------------------------------------------------ round 2
@@ -457,6 +459,69 @@ def build():
                "image. METEOR (which starts a Java process and made the tests ~5x slower) is opt-in via "
                "<font face='Courier'>--meteor</font>. A <font face='Courier'>python -m src.predict</font> "
                "command captions arbitrary image files and can save the attention figure."))
+
+    # ------------------------------------------------------------------ round 3
+    s.append(PageBreak())
+    s.append(P("9. Round 3: production / research-readiness audit", H1))
+    s.append(P("A third pass audited the code against a standard ML-engineering checklist: silent "
+               "training bugs, memory and throughput, modularity, reproducibility and documentation."))
+    s.append(P("9.1 Silent bugs and bad practices found in this pass", H2))
+    s.append(table([
+        ["#", "Finding", "Why it matters", "Fix"],
+        ["1", "Fine-tuning (<font face='Courier'>train_CNN</font>) put the <i>whole</i> ResNet in train "
+              "mode", "BatchNorm in frozen layers 1-3 drifted while their weights stayed fixed - "
+              "a silent mismatch that degrades features", "Only layer4 switches to train mode; test "
+              "asserts frozen BN stats are unchanged and layer4 BN updates"],
+        ["2", "<font face='Courier'>loss.item()</font> and grad-norm <font face='Courier'>float()</font> "
+              "every step", "Forces a GPU-to-CPU sync per step, stalling the CUDA queue", "Accumulate "
+              "detached device tensors; read once per epoch"],
+        ["3", "No gradient accumulation", "Large effective batches impossible on small GPUs",
+              "<font face='Courier'>train.grad_accum_steps</font>; short last group weighted "
+              "correctly; test proves 2x4 accumulated == 1x8"],
+        ["4", "Checkpoints held weights only; no optimizer / scheduler / scaler / RNG state",
+              "Interrupted runs restart from scratch or resume with a wrong LR schedule",
+              "<font face='Courier'>last.pth</font> + per-epoch shuffle reseeding; test proves "
+              "resume is bit-exact"],
+        ["5", "DataLoader workers and shuffle order not seeded", "Runs not reproducible with "
+              "num_workers &gt; 0", "<font face='Courier'>worker_init_fn</font> + seeded generator"],
+        ["6", "No cuDNN determinism switch", "GPU reruns differ", "<font face='Courier'>deterministic: "
+              "true</font> enables deterministic algorithms"],
+        ["7", "<font face='Courier'>torch.load(weights_only=False)</font>", "Unpickling a checkpoint "
+              "can execute arbitrary code", "Checkpoints contain only tensors/primitives; loaded with "
+              "<font face='Courier'>weights_only=True</font>; atomic writes"],
+        ["8", "Hyper-parameters spread across argparse defaults and function signatures",
+              "Hard to reproduce or compare runs", "Typed dataclass config + YAML + "
+              "<font face='Courier'>--set</font> overrides, stored in every checkpoint"],
+        ["9", "Evaluation rebuilt the split from CLI paths and two saved keys", "A changed default "
+              "(e.g. val_frac) would silently evaluate on a different split", "Evaluator rebuilds "
+              "the split from the full config saved in the checkpoint"],
+        ["10", "Logger skipped the file handler if the logger already existed", "Second run in a "
+               "process (e.g. notebook) wrote no train.log", "Handlers added idempotently per file"],
+    ], [0.7 * cm, 4.6 * cm, 5.6 * cm, 6.1 * cm]))
+    s.append(P("9.2 Checklist items verified as correct", H2))
+    s += bullets([
+        "<b>Data leakage:</b> split by image before anything else; vocabulary built from training "
+        "captions only; image normalisation uses fixed ImageNet statistics (nothing is fitted on "
+        "data); augmentation only on the training transform.",
+        "<b>Train/eval toggles:</b> <font face='Courier'>model.train()</font> at the start of every "
+        "epoch, <font face='Courier'>model.eval()</font> + <font face='Courier'>no_grad</font> for "
+        "validation, decoding and feature caching; <font face='Courier'>zero_grad</font> per optimizer step.",
+        "<b>Loss / activation:</b> the decoder returns raw logits; "
+        "<font face='Courier'>CrossEntropyLoss</font> applies log-softmax itself (no double softmax); "
+        "beam search uses <font face='Courier'>log_softmax</font> explicitly; loss computed in fp32 under AMP.",
+        "<b>Shapes:</b> no hard-coded 49 / 2048 in the decoder path (grid derived from the feature "
+        "map; tests run at 64 px = 2x2 grid); padding invariance and KV-cache equivalence are unit-tested.",
+        "<b>Memory:</b> logged values are Python floats (no retained graphs); frozen backbone under "
+        "<font face='Courier'>no_grad</font>; features cached in fp16; AMP bf16/fp16 on CUDA.",
+    ])
+    s.append(P("9.3 Result", H2))
+    s.append(P("20 tests (up from 15) cover the new guarantees: config round-trip and overrides, "
+               "fine-tuning BatchNorm behaviour, gradient-accumulation equivalence, bit-exact resume, "
+               "and an end-to-end <font face='Courier'>run()</font> from a config that writes all "
+               "artefacts. <font face='Courier'>pyflakes</font> reports no issues. A "
+               "<font face='Courier'>pyproject.toml</font> adds extras and console scripts "
+               "(<font face='Courier'>caption-train</font>, <font face='Courier'>caption-evaluate</font>, "
+               "<font face='Courier'>caption-predict</font>)."))
 
     doc = SimpleDocTemplate(OUT, pagesize=A4, leftMargin=2 * cm, rightMargin=2 * cm,
                             topMargin=1.8 * cm, bottomMargin=1.8 * cm,

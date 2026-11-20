@@ -14,20 +14,23 @@
 
 ---
 
-## 📌 Overview
+## 📌 Project overview
 
-- **ResNet-50** (ImageNet weights) → 7×7×2048 spatial feature map → 49 region vectors
-- **Learned spatial position embeddings** so the decoder knows *where* each region is
-- **Pre-LN Transformer decoder** (causal self-attention + cross-attention over the 49 regions)
-- **KV-cached decoding**: batched greedy and batched beam search, both returning attention maps
-- **Corpus BLEU-1…4, CIDEr-D, ROUGE-L** against all 5 references (built in, verified against
-  `pycocoevalcap`); optional METEOR
-- Dataset: **Flickr8k** (8,091 images × 5 captions), split **by image** 80 / 10 / 10
+| | |
+|---|---|
+| **Task** | Image captioning (vision → language), Flickr8k: 8,091 images × 5 captions |
+| **Framework** | PyTorch ≥ 2.1 |
+| **Encoder** | ResNet-50 (ImageNet), frozen by default (BatchNorm kept in eval mode); optional layer4 fine-tuning |
+| **Decoder** | Pre-LN Transformer: causal self-attention + cross-attention over the 7×7 = 49 image regions |
+| **Decoding** | KV-cached greedy and batched beam search (GNMT length penalty), both return attention maps |
+| **Metrics** | Corpus BLEU-1…4, CIDEr-D, ROUGE-L against all 5 references (built in, verified against `pycocoevalcap`); optional METEOR |
+| **Engineering** | YAML/dataclass config, CNN-feature cache, AMP, gradient accumulation, exact resume, 20 tests + CI |
 
 > Reference: Xu et al., *Show, Attend and Tell* (2015) — [arXiv:1502.03044](https://arxiv.org/abs/1502.03044)
 
-📄 **A step-by-step write-up of every process, what changed and why, is in
-[`docs/IMPROVEMENTS.pdf`](docs/IMPROVEMENTS.pdf).**
+📄 **[`docs/IMPROVEMENTS.pdf`](docs/IMPROVEMENTS.pdf)** is a step-by-step report of every
+process in the pipeline: what the original code did, what was wrong, what replaced it and why,
+with measured benchmarks and ablations.
 
 ---
 
@@ -35,7 +38,7 @@
 
 ```
 Image 3×224×224
-   │  ResNet-50 (frozen, BatchNorm kept in eval mode; optional layer4 fine-tune)
+   │  ResNet-50 (frozen, BatchNorm in eval mode; optional layer4 fine-tune)
    ▼
 2048×7×7  ──flatten──►  49×2048  ──Linear+LayerNorm──►  49×d  + learned 2-D position embedding
                                                            │  (memory: keys / values)
@@ -47,18 +50,53 @@ Caption ids ─► Embedding×√d + sinusoidal PE                │
               │ LN → FFN (GELU)                                     │
               └─────────────────────────────────────────────────────┘
    ▼
-LayerNorm → Linear → next-token logits
+LayerNorm → Linear → next-token logits (raw logits → CrossEntropyLoss)
 ```
 
 ---
 
-## 🚀 Getting started
+## 🗂️ Folder structure
+
+```
+.
+├── configs/
+│   └── default.yaml          # every hyper-parameter, with defaults
+├── src/
+│   ├── config.py             # typed dataclass config, YAML loading, CLI overrides
+│   ├── dataset.py            # caption parsing, leak-free split, Vocabulary, datasets, loaders
+│   ├── model.py              # EncoderCNN, Pre-LN Transformer decoder (+ KV-cache)
+│   ├── train.py              # training loop: AMP, grad accumulation, early stopping, resume
+│   ├── evaluate.py           # corpus evaluation CLI (BLEU, CIDEr-D, ROUGE-L, METEOR)
+│   ├── inference.py          # KV-cached greedy and batched beam search
+│   ├── metrics.py            # dependency-free CIDEr-D and ROUGE-L
+│   ├── predict.py            # caption image files from the command line
+│   ├── attention_viz.py      # attention overlays + attention entropy
+│   └── utils.py              # seeding, device, logging, checkpoint save/load
+├── tests/                    # pytest: pipeline, metrics, training/resume (CPU, synthetic data)
+├── notebooks/
+│   └── image_captioning.ipynb   # EDA, diagnostics, evaluation, attention plots
+├── docs/
+│   ├── IMPROVEMENTS.pdf      # step-by-step report (built by build_report.py)
+│   ├── benchmark_*.py/json   # reproducible speed benchmarks
+│   └── ablation.py/…json     # controlled ablation study
+├── app.py                    # Gradio demo
+├── pyproject.toml            # package metadata, extras, console scripts, pytest config
+├── requirements.txt / requirements-dev.txt
+└── .github/workflows/tests.yml
+```
+
+Generated at run time (git-ignored): `data/`, `checkpoints/` (`best_model.pth`, `last.pth`,
+`config.yaml`, `history.json`, `train.log`, `eval_results.json`).
+
+---
+
+## ⚙️ Setup & installation
 
 ```bash
 git clone https://github.com/saumyadeepgain/multimodal-image-captioning.git
 cd multimodal-image-captioning
 python -m venv venv && source venv/bin/activate     # Windows: venv\Scripts\activate
-pip install -r requirements.txt
+pip install -r requirements.txt                    # or: pip install -e ".[demo,dev]"
 ```
 
 Download **Flickr8k** from [Kaggle](https://www.kaggle.com/datasets/adityajn105/flickr8k) and extract to:
@@ -68,68 +106,89 @@ data/archive/Images/        ← 8,091 .jpg files
 data/archive/captions.txt   ← "image,caption" (the original Flickr8k.token.txt also works)
 ```
 
-### Train
+---
+
+## 🚀 Training
 
 ```bash
-python -m src.train --epochs 20
+python -m src.train                                   # built-in defaults = configs/default.yaml
+python -m src.train --config configs/default.yaml --set train.epochs=30 train.lr=1e-4
 ```
+
+Every hyper-parameter lives in `configs/default.yaml` (typed in `src/config.py`); override any
+of them with `--set section.key=value`. Useful ones:
+
+| Override | Effect |
+|---|---|
+| `model.train_CNN=true` | fine-tune ResNet layer4 (disables feature caching, enables augmentation) |
+| `train.grad_accum_steps=4` | effective batch = `batch_size × 4` with the memory of one batch |
+| `train.select_metric=CIDEr` | choose the best checkpoint by val CIDEr (`BLEU-4`, `CIDEr` or `val_loss`) |
+| `train.bleu_limit=500` | decode only 500 val images per epoch for model selection (faster) |
+| `train.stop_after_epochs=5` | stop this process after 5 epochs (time-limited jobs) |
+| `train.resume=checkpoints/last.pth` | continue exactly where a run stopped |
+| `deterministic=true` | deterministic cuDNN kernels for bit-exact reruns |
 
 With the default frozen encoder, ResNet-50 features are computed **once per image** and cached
 (fp16, ≈1.2 GB RAM for the train split), so every epoch only runs the decoder.
-Useful flags: `--fine-tune-cnn` (train ResNet layer4, disables caching and enables augmentation),
-`--embed-size`, `--layers`, `--heads`, `--batch-size`, `--lr`, `--label-smoothing`, `--patience`.
 
-Outputs: `checkpoints/best_model.pth` (weights + config + vocabulary, selected on **val BLEU-4**)
-and `checkpoints/history.json` (loss, perplexity, BLEU-4, LR, grad-norm, epoch time).
+**Outputs** in `train.out_dir` (default `checkpoints/`):
+`best_model.pth` (weights + model config + vocabulary + full experiment config),
+`last.pth` (adds optimizer, scheduler, AMP scaler and RNG states for exact resume),
+`config.yaml`, `history.json` (loss, perplexity, BLEU-4, CIDEr, LR, grad-norm, time per epoch)
+and `train.log`.
 
-### Evaluate
-
-```bash
-python -m src.evaluate --split test --beam 3
-```
-
-Writes `checkpoints/eval_results.json` with corpus BLEU-1…4, CIDEr-D, ROUGE-L, latency per
-image and sample predictions. Add `--meteor` for METEOR (needs `pycocoevalcap` and Java).
-
-### Caption your own images
+**Resuming** is bit-exact: an interrupted and resumed run produces the same weights as an
+uninterrupted one (tested in `tests/test_training.py`).
 
 ```bash
-python -m src.predict photo1.jpg photo2.jpg --beam 3 --attention-out attention.png
+python -m src.train --config checkpoints/config.yaml --set train.resume=checkpoints/last.pth
 ```
-
-### Demo app
-
-```bash
-python app.py --checkpoint checkpoints/best_model.pth
-```
-
-Gradio UI: upload an image, choose greedy or beam search, see the caption and per-word attention.
-
-### Notebook
-
-`notebooks/image_captioning.ipynb` — EDA, architecture, training diagnostics, evaluation and
-attention plots. It automatically uses `history.json` / the trained checkpoint when present.
-
-### Tests
-
-```bash
-pip install -r requirements-dev.txt
-pytest -q
-```
-
-The 15 tests run on CPU in a few seconds with a random-init backbone and a synthetic dataset, and are
-run by GitHub Actions on every push.
 
 ---
 
-## 📊 Results
+## 📏 Evaluation & inference
+
+```bash
+python -m src.evaluate --split test --beam 3          # -> checkpoints/eval_results.json
+python -m src.predict photo1.jpg photo2.jpg --beam 3 --attention-out attention.png
+python app.py --checkpoint checkpoints/best_model.pth  # Gradio demo
+```
+
+`src.evaluate` rebuilds exactly the training-time split from the config stored in the
+checkpoint, decodes the split in batches and reports corpus BLEU-1…4, CIDEr-D, ROUGE-L and
+latency per image (`--meteor` adds METEOR; needs `pycocoevalcap` and Java).
+
+The notebook `notebooks/image_captioning.ipynb` covers EDA, architecture, training diagnostics,
+evaluation and attention plots, and automatically uses `history.json` / the trained checkpoint.
+
+---
+
+## 🧪 Tests
+
+```bash
+pip install -r requirements-dev.txt
+pytest
+```
+
+20 tests run on CPU in ~11 s with a random-init backbone and synthetic data: no split leakage,
+caption parsing, frozen-BatchNorm behaviour (frozen and fine-tuned), padding invariance,
+KV-cache = full forward, batched = per-image beam search, CIDEr-D/ROUGE-L = `pycocoevalcap`,
+initial loss ≈ log V, gradient accumulation = large batch, bit-exact resume, and an end-to-end
+run from a config. GitHub Actions runs them on every push.
+
+---
+
+## 📊 Expected results & measured metrics
 
 **Caption quality:** run `python -m src.train` then `python -m src.evaluate` — the numbers
 are written to `checkpoints/eval_results.json`. No trained checkpoint is committed, so this README
 does not quote BLEU / CIDEr numbers. *(An earlier version of this README listed a results table
 that came from placeholder "mock" data in the notebook; it was removed because it was not measured.)*
 For orientation, published Flickr8k results for soft-attention models are around
-BLEU-1 ≈ 0.67 and BLEU-4 ≈ 0.19–0.21 (Xu et al., 2015).
+BLEU-1 ≈ 0.67 and BLEU-4 ≈ 0.19–0.21 (Xu et al., 2015); a frozen ResNet-50 + 3-layer
+Transformer decoder trained with the default config should land in that range. Our split is a
+seeded random 80/10/10 split, not the official Karpathy split, so numbers are close to but not
+strictly comparable with papers.
 
 **Engineering speed-ups (measured, old code vs. new code)** — CPU, 4 threads, batch 16,
 d=256, 3 layers, vocab 3k, 20-token captions. Script: see `docs/IMPROVEMENTS.pdf`.
@@ -162,30 +221,6 @@ position embedding showed no measurable effect on this task — reported as is.
 
 ---
 
-## 🗂️ Project structure
-
-```
-.
-├── src/
-│   ├── dataset.py        # caption parsing, leak-free split, Vocabulary, datasets, transforms
-│   ├── model.py          # EncoderCNN, Pre-LN Transformer decoder, ImageCaptioningModel
-│   ├── train.py          # CLI training: feature cache, AdamW, warm-up+cosine, AMP, early stop
-│   ├── inference.py      # KV-cached batched greedy and beam search
-│   ├── evaluate.py       # corpus evaluation CLI
-│   ├── metrics.py        # dependency-free CIDEr-D and ROUGE-L
-│   ├── predict.py        # caption image files from the command line
-│   ├── checkpoint.py     # self-contained checkpoints (weights + config + vocab)
-│   └── attention_viz.py  # attention overlays + attention entropy
-├── tests/                # pytest suite (CPU, synthetic data)
-├── notebooks/image_captioning.ipynb
-├── docs/IMPROVEMENTS.pdf # step-by-step report of the processes and changes
-├── app.py                # Gradio demo
-├── requirements.txt / requirements-dev.txt
-└── .github/workflows/tests.yml
-```
-
----
-
 ## 🔍 Key design decisions
 
 | Decision | Rationale |
@@ -199,6 +234,8 @@ position embedding showed no measurable effect on this task — reported as is.
 | AdamW + warm-up + cosine, label smoothing 0.1 | Standard Transformer recipe; less over-confident captions |
 | Select checkpoint on val BLEU-4 | Loss and caption quality are only loosely correlated |
 | Split by image, vocab from train only | No leakage between splits |
+| One config object, saved in every checkpoint | Any result can be reproduced from its checkpoint |
+| `last.pth` with optimizer/scheduler/RNG state | Exact resume after interruption |
 
 ---
 

@@ -28,6 +28,28 @@ checkpoints/*.pth
 checkpoints/*.json
 checkpoints/*.png
 .pytest_cache/
+*.ckpt
+*.safetensors
+*.onnx
+checkpoints/*.yaml
+checkpoints/*.log
+checkpoints/*.tmp
+
+# Experiment tracking / outputs
+runs/
+outputs/
+wandb/
+mlruns/
+lightning_logs/
+*.npy
+*.npz
+
+# Tooling caches
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.idea/
 
 # Logs
 *.log

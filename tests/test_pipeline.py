@@ -90,7 +90,7 @@ def test_beam_and_greedy_wrappers_return_attention():
 
 
 def test_end_to_end_train_eval_checkpoint(tiny_flickr, tmp_path):
-    from src.checkpoint import load_checkpoint
+    from src.utils import load_checkpoint
     from src.evaluate import evaluate_captions
     from src.train import precompute_features, train_model
     from src.dataset import CachedFeatureDataset, MyCollate
