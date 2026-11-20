@@ -1,0 +1,18 @@
+{
+ "train_step_ms_old": 858.1703617499841,
+ "bn_drift_old": 0.000613170734141022,
+ "trainable_params_old": 6799800,
+ "train_step_ms_new": 768.6382610000067,
+ "bn_drift_new": 0.0,
+ "trainable_params_new": 4469432,
+ "train_step_ms_new_cached": 74.26922450000575,
+ "greedy_16img_ms_old": 1655.547212999977,
+ "greedy_16img_ms_new": 876.131821499996,
+ "beam3_ms_old": 214.24695899997914,
+ "beam3_ms_new": 134.59698699995215,
+ "beam5_ms_old": 354.9997279999957,
+ "beam5_ms_new": 153.84116900003164,
+ "old_len60": "RuntimeError",
+ "tokenize_40k_ms_regex": 97.54289600004995,
+ "tokenize_40k_ms_nltk": "fails: LookupError"
+}
