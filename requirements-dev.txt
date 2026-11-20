@@ -1,0 +1,7 @@
+# Test / lint tooling, pinned (matches CI).
+-r requirements.txt
+pytest==9.1.1
+pytest-cov==7.1.0
+ruff==0.16.9
+tensorboard==2.21.0    # exercised by tests/test_hardening.py
+pycocoevalcap==1.2     # reference implementation the metric tests compare against

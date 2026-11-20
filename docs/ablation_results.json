@@ -1,0 +1,27 @@
+{
+ "untied (default)": {
+  "init_loss": 3.0605217615763345,
+  "val_loss": 0.25571466982364655,
+  "token_acc": 0.8781818151473999
+ },
+ "tied, no out-scale": {
+  "init_loss": 8.034228483835856,
+  "val_loss": 0.35802745819091797,
+  "token_acc": 0.8474242488543192
+ },
+ "tied + out-scale": {
+  "init_loss": 2.9924956957499185,
+  "val_loss": 0.5538002451260885,
+  "token_acc": 0.7939394116401672
+ },
+ "untied, NO spatial pos-embedding": {
+  "init_loss": 3.0607856114705405,
+  "val_loss": 0.25704607367515564,
+  "token_acc": 0.878333330154419
+ },
+ "untied, label smoothing 0.1": {
+  "init_loss": 3.065568685531616,
+  "val_loss": 0.3304448425769806,
+  "token_acc": 0.8772727251052856
+ }
+}

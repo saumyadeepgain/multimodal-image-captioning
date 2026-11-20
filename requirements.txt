@@ -1,13 +1,15 @@
-torch
-torchvision
-transformers
-nltk
-pycocoevalcap
-matplotlib
-gradio
-pandas
-Pillow
-tqdm
-scikit-learn
-seaborn
-wordcloud
+# Runtime dependencies, pinned to the versions the test suite was run against
+# (Python 3.12 / 3.13, Linux). For a library-style install with version ranges use
+# `pip install -e .` (see pyproject.toml).
+#
+# CPU-only PyTorch (much smaller download):
+#   pip install -r requirements.txt --extra-index-url https://download.pytorch.org/whl/cpu
+# CUDA builds: replace `cpu` with e.g. `cu126` (see https://pytorch.org/get-started/locally/).
+torch==2.15.0
+torchvision==0.29.2
+numpy==2.5.3
+pillow==12.3.0
+nltk==3.10.4
+tqdm==4.70.1
+matplotlib==3.11.2
+PyYAML==6.0.3
