@@ -1,5 +1,8 @@
-# Default experiment configuration. Override any value from the CLI, e.g.
-#   python -m src.train --config configs/default.yaml --set train.lr=1e-4 model.num_layers=4
+# Default experiment configuration.
+# Precedence: these values < --config FILE < per-key flags < --set KEY=VALUE.
+#   python src/train.py --config configs/default.yaml --lr 1e-4 --batch_size 32
+#   python src/train.py --resume checkpoints/last.pth --backend tensorboard
+# Short flags resolve by section priority train > model > data > eval > tracking.
 
 data:
   img_dir: data/archive/Images
@@ -10,6 +13,7 @@ data:
   max_len: 40
   image_size: 224
   num_workers: 4
+  verify_images: true
 model:
   embed_size: 512
   num_layers: 3
@@ -28,13 +32,16 @@ train:
   weight_decay: 0.01
   label_smoothing: 0.1
   warmup_ratio: 0.05
+  min_lr_ratio: 0.05
   max_grad_norm: 1.0
   amp: true
   cache_features: true
   augment: true
   patience: 5
+  min_delta: 0.0
   select_metric: BLEU-4
   bleu_limit: 0
+  max_oom_splits: 8
   out_dir: checkpoints
   resume: null
   stop_after_epochs: null
@@ -44,5 +51,12 @@ eval:
   length_penalty: 0.7
   batch_size: 64
   meteor: false
+tracking:
+  backend: none
+  project: image-captioning
+  run_name: null
+  log_every_n_steps: 50
+  wandb_mode: online
 seed: 42
 deterministic: false
+device: auto

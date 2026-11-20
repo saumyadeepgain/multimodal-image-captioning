@@ -15,10 +15,16 @@ Design notes (see docs/IMPROVEMENTS.pdf for the full discussion):
   which broke the old code), is deterministic, and is ~20x faster.
 * ``Vocabulary`` can be serialised to / from a plain dict, so a checkpoint can
   carry its own vocabulary. Without that the demo app could not decode ids.
+* Edge cases: a missing image folder / captions file raises a clear error;
+  with ``verify_images`` every image is checked once up front and missing or
+  unreadable files are dropped (with a logged summary) instead of silently
+  becoming black training images; a file that becomes unreadable mid-run is
+  replaced by a neighbouring sample and logged once.
 """
 
 from __future__ import annotations
 
+import logging
 import os
 import random
 import re
@@ -27,7 +33,8 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 import torch
 import torchvision.transforms as T
-from PIL import Image
+from concurrent.futures import ThreadPoolExecutor
+from PIL import Image, UnidentifiedImageError
 from torch.utils.data import DataLoader, Dataset
 
 PAD, START, END, UNK = "<pad>", "<start>", "<end>", "<unk>"
@@ -37,6 +44,36 @@ IMAGENET_MEAN = (0.485, 0.456, 0.406)
 IMAGENET_STD = (0.229, 0.224, 0.225)
 
 _TOKEN_RE = re.compile(r"[a-z0-9]+(?:'[a-z]+)?")
+_IMAGE_ERRORS = (OSError, UnidentifiedImageError, ValueError, SyntaxError)
+_FALLBACK_TRIES = 10
+logger = logging.getLogger("captioning")
+_warned_files: set = set()
+
+
+def _warn_once(path: str, exc: BaseException) -> None:
+    if path not in _warned_files:
+        _warned_files.add(path)
+        logger.warning(f"Unreadable image {path}: {type(exc).__name__}: {exc}")
+
+
+def open_image(path: str) -> Image.Image:
+    """Open an image as RGB, forcing a full decode so truncated/corrupt files
+    fail here (PIL is lazy) rather than deep inside a transform."""
+    with Image.open(path) as im:
+        im.load()
+        return im.convert("RGB")
+
+
+def check_image(path: str) -> Optional[str]:
+    """``None`` if the image is readable, else a short reason."""
+    if not os.path.isfile(path):
+        return "missing"
+    try:
+        with Image.open(path) as im:
+            im.verify()
+        return None
+    except _IMAGE_ERRORS as exc:
+        return f"{type(exc).__name__}: {exc}"
 
 
 def tokenize(text: str) -> List[str]:
@@ -124,8 +161,12 @@ def load_captions(captions_file: str) -> List[Tuple[str, str]]:
       * Original ``Flickr8k.token.txt``: ``img.jpg#0<TAB>caption``
     Only the first separator is used, so commas inside captions are safe.
     """
+    if not os.path.isfile(captions_file):
+        raise FileNotFoundError(
+            f"Captions file not found: {captions_file}. Download Flickr8k "
+            "(https://www.kaggle.com/datasets/adityajn105/flickr8k) and set data.captions_file.")
     pairs: List[Tuple[str, str]] = []
-    with open(captions_file, encoding="utf-8") as f:
+    with open(captions_file, encoding="utf-8", errors="replace") as f:
         for line_no, line in enumerate(f):
             line = line.strip()
             if not line:
@@ -139,8 +180,33 @@ def load_captions(captions_file: str) -> List[Tuple[str, str]]:
                 continue
             if line_no == 0 and img.strip().lower() == "image":
                 continue  # header row
-            pairs.append((img.strip(), cap.strip()))
+            if img.strip() and cap.strip():
+                pairs.append((img.strip(), cap.strip()))
+    if not pairs:
+        raise ValueError(f"No (image, caption) pairs could be parsed from {captions_file}; "
+                         "expected 'image,caption' lines or 'img.jpg#0<TAB>caption'.")
     return pairs
+
+
+def verify_image_pairs(img_dir: str, pairs: List[Tuple[str, str]], num_threads: int = 16
+                       ) -> List[Tuple[str, str]]:
+    """Drop pairs whose image is missing or unreadable; log a summary.
+
+    Raises ``FileNotFoundError`` if *no* image is usable (almost always a wrong
+    ``data.img_dir``)."""
+    images = sorted({img for img, _ in pairs})
+    with ThreadPoolExecutor(max_workers=num_threads) as pool:
+        reasons = dict(zip(images, pool.map(lambda i: check_image(os.path.join(img_dir, i)),
+                                            images)))
+    bad = {img: r for img, r in reasons.items() if r is not None}
+    if len(bad) == len(images):
+        raise FileNotFoundError(f"None of the {len(images)} images referenced in the captions "
+                                f"file were found/readable in {img_dir}.")
+    if bad:
+        examples = ", ".join(f"{k} ({v})" for k, v in list(bad.items())[:5])
+        logger.warning(f"Dropping {len(bad)} of {len(images)} images that are missing or "
+                       f"unreadable, e.g. {examples}")
+    return [(img, cap) for img, cap in pairs if img not in bad]
 
 
 def split_by_image(pairs: List[Tuple[str, str]], val_frac: float = 0.1,
@@ -202,18 +268,29 @@ class CaptionDataset(Dataset):
         return len(self.imgs)
 
     def load_image(self, img_id: str) -> Image.Image:
-        path = os.path.join(self.img_dir, img_id)
-        if not os.path.exists(path):
-            if self.strict:
-                raise FileNotFoundError(path)
-            return Image.new("RGB", (224, 224))
-        return Image.open(path).convert("RGB")
+        """Open one image; raises on missing / corrupt files."""
+        return open_image(os.path.join(self.img_dir, img_id))
 
     def __getitem__(self, index: int) -> Tuple[torch.Tensor, torch.Tensor]:
-        img = self.load_image(self.imgs[index])
-        if self.transform is not None:
-            img = self.transform(img)
-        return img, self.encoded[index]
+        """``(image [3, H, W], caption ids [T])``.
+
+        If the image cannot be read, the warning is logged once per file and the
+        next sample is used instead (``strict=True`` raises instead). A
+        replacement keeps its own caption, so image and text always match."""
+        for attempt in range(_FALLBACK_TRIES):
+            i = (index + attempt) % len(self.imgs)
+            try:
+                img = self.load_image(self.imgs[i])
+            except _IMAGE_ERRORS as exc:
+                if self.strict:
+                    raise
+                _warn_once(os.path.join(self.img_dir, self.imgs[i]), exc)
+                continue
+            if self.transform is not None:
+                img = self.transform(img)
+            return img, self.encoded[i]
+        raise RuntimeError(f"{_FALLBACK_TRIES} consecutive unreadable images starting at "
+                           f"index {index} in {self.img_dir}")
 
 
 class ImageDataset(Dataset):
@@ -238,12 +315,16 @@ class ImageDataset(Dataset):
         return len(self.images)
 
     def __getitem__(self, index: int) -> Tuple[torch.Tensor, int]:
+        """``(image [3, H, W], index)``. An unreadable image cannot be swapped
+        for another one here (its references would no longer match), so it is
+        replaced by a black image and logged once; ``strict=True`` raises."""
         path = os.path.join(self.img_dir, self.images[index])
-        if os.path.exists(path):
-            img = Image.open(path).convert("RGB")
-        elif self.strict:
-            raise FileNotFoundError(path)
-        else:
+        try:
+            img = open_image(path)
+        except _IMAGE_ERRORS as exc:
+            if self.strict:
+                raise
+            _warn_once(path, exc)
             img = Image.new("RGB", (224, 224))
         if self.transform is not None:
             img = self.transform(img)
@@ -291,12 +372,24 @@ Flickr8kDataset = CaptionDataset
 
 def build_datasets(img_dir: str, captions_file: str, freq_threshold: int = 5,
                    max_len: int = 40, val_frac: float = 0.1, test_frac: float = 0.1,
-                   seed: int = 42, augment: bool = True, image_size: int = 224):
-    """Read, split, build vocab (train only) and create datasets."""
-    if not os.path.exists(captions_file):
+                   seed: int = 42, augment: bool = True, image_size: int = 224,
+                   verify_images: bool = False):
+    """Read, (optionally) verify, split, build vocab (train only), create datasets.
+
+    Returns ``(datasets, vocab)`` with keys ``train``/``val``/``test``
+    (:class:`CaptionDataset`) and ``train_images``/``val_images``/``test_images``
+    (:class:`ImageDataset`)."""
+    if not os.path.isdir(img_dir):
         raise FileNotFoundError(
-            f"{captions_file} not found. Download Flickr8k (see README).")
-    splits = split_by_image(load_captions(captions_file), val_frac, test_frac, seed)
+            f"Image folder not found: {img_dir}. Download Flickr8k "
+            "(https://www.kaggle.com/datasets/adityajn105/flickr8k) and set data.img_dir.")
+    pairs = load_captions(captions_file)
+    if verify_images:
+        pairs = verify_image_pairs(img_dir, pairs)
+    splits = split_by_image(pairs, val_frac, test_frac, seed)
+    if not splits["train"]:
+        raise ValueError("The training split is empty; lower data.val_frac / data.test_frac "
+                         "or check the dataset.")
     vocab = Vocabulary(freq_threshold)
     vocab.build_vocabulary(c for _, c in splits["train"])  # train only: no leakage
 
@@ -348,7 +441,8 @@ def build_datasets_from_config(data_cfg: Any, seed: int, augment: bool
     return build_datasets(data_cfg.img_dir, data_cfg.captions_file,
                           freq_threshold=data_cfg.freq_threshold, max_len=data_cfg.max_len,
                           val_frac=data_cfg.val_frac, test_frac=data_cfg.test_frac, seed=seed,
-                          augment=augment, image_size=data_cfg.image_size)
+                          augment=augment, image_size=data_cfg.image_size,
+                          verify_images=getattr(data_cfg, "verify_images", False))
 
 
 def get_data_loaders(img_dir: str, captions_file: str, transform=None, batch_size: int = 32,

@@ -22,6 +22,7 @@ import logging
 import os
 import random
 import sys
+from datetime import datetime
 from typing import Any, Dict, Optional, Tuple
 
 import numpy as np
@@ -68,6 +69,7 @@ def make_generator(seed: int) -> torch.Generator:
 
 
 def get_rng_state() -> Dict[str, Any]:
+    """Python / NumPy / torch / CUDA RNG states in a ``weights_only``-safe form."""
     state = np.random.get_state()
     return {
         "python": random.getstate(),
@@ -78,6 +80,7 @@ def get_rng_state() -> Dict[str, Any]:
 
 
 def set_rng_state(state: Dict[str, Any]) -> None:
+    """Inverse of :func:`get_rng_state`."""
     py = state["python"]
     random.setstate((py[0], tuple(py[1]), py[2]))
     n = state["numpy"]
@@ -91,8 +94,27 @@ def set_rng_state(state: Dict[str, Any]) -> None:
 # Device and logging
 # --------------------------------------------------------------------------- #
 def get_device(prefer: Optional[str] = None) -> torch.device:
-    if prefer:
-        return torch.device(prefer)
+    """Pick the compute device.
+
+    ``prefer`` = ``None`` / ``"auto"``: CUDA if available, else Apple MPS, else CPU.
+    An explicit request that cannot be honoured (e.g. ``"cuda"`` on a machine
+    without a GPU, or ``"cuda:3"`` with two GPUs) logs a warning and falls back
+    to the automatic choice instead of crashing later inside a kernel.
+    """
+    log = logging.getLogger("captioning")
+    if prefer and prefer != "auto":
+        want = torch.device(prefer)
+        if want.type == "cuda":
+            if torch.cuda.is_available() and (want.index is None
+                                              or want.index < torch.cuda.device_count()):
+                return want
+            log.warning(f"device '{prefer}' requested but not available; falling back.")
+        elif want.type == "mps":
+            if getattr(torch.backends, "mps", None) and torch.backends.mps.is_available():
+                return want
+            log.warning("device 'mps' requested but not available; falling back.")
+        else:
+            return want
     if torch.cuda.is_available():
         return torch.device("cuda")
     if getattr(torch.backends, "mps", None) and torch.backends.mps.is_available():
@@ -100,14 +122,45 @@ def get_device(prefer: Optional[str] = None) -> torch.device:
     return torch.device("cpu")
 
 
-def get_logger(name: str = "captioning", log_file: Optional[str] = None) -> logging.Logger:
+def is_oom_error(exc: BaseException) -> bool:
+    """True for CUDA (and MPS) out-of-memory errors."""
+    if isinstance(exc, torch.cuda.OutOfMemoryError):
+        return True
+    return isinstance(exc, RuntimeError) and "out of memory" in str(exc).lower()
+
+
+def free_device_memory() -> None:
+    """Release cached allocator blocks after an OOM so a retry can succeed."""
+    import gc
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    mps = getattr(torch, "mps", None)
+    if mps is not None and getattr(torch.backends, "mps", None) and \
+            torch.backends.mps.is_available():
+        mps.empty_cache()
+
+
+def timestamp() -> str:
+    """``YYYYmmdd-HHMMSS`` for run names and log files."""
+    return datetime.now().strftime("%Y%m%d-%H%M%S")
+
+
+def timestamped_log_path(out_dir: str, prefix: str = "train") -> str:
+    """``<out_dir>/logs/<prefix>_<timestamp>.log`` (one file per run)."""
+    return os.path.join(out_dir, "logs", f"{prefix}_{timestamp()}.log")
+
+
+def get_logger(name: str = "captioning", log_file: Optional[str] = None,
+               stream: Any = None) -> logging.Logger:
     """Console (+ optional file) logger with timestamps. Idempotent per handler:
-    calling it again with a new ``log_file`` adds that file."""
+    calling it again with a new ``log_file`` adds that file. ``stream`` defaults
+    to stdout (CLIs whose stdout is data, like ``src.predict``, pass stderr)."""
     logger = logging.getLogger(name)
     logger.setLevel(logging.INFO)
     fmt = logging.Formatter("%(asctime)s | %(levelname)s | %(message)s", "%H:%M:%S")
     if not any(type(h) is logging.StreamHandler for h in logger.handlers):
-        sh = logging.StreamHandler(sys.stdout)
+        sh = logging.StreamHandler(stream or sys.stdout)
         sh.setFormatter(fmt)
         logger.addHandler(sh)
     if log_file:
@@ -160,7 +213,13 @@ def save_training_state(path: str, model: ImageCaptioningModel, vocab: Vocabular
 
 
 def _load(path: str, device: Any) -> Dict[str, Any]:
-    ckpt = torch.load(path, map_location=device, weights_only=True)
+    if not os.path.isfile(path):
+        raise FileNotFoundError(f"Checkpoint not found: {path}")
+    try:
+        ckpt = torch.load(path, map_location=device, weights_only=True)
+    except Exception as exc:
+        raise ValueError(f"Could not read checkpoint {path} (corrupted or not a checkpoint "
+                         f"written by this project): {exc}") from exc
     if "model_state" not in ckpt:
         raise ValueError(f"{path} is a bare state_dict from the original training script; "
                          "re-train with `python -m src.train` to get a full checkpoint.")
@@ -191,7 +250,15 @@ def load_training_state(path: str, model: ImageCaptioningModel,
     """Restore model/optimizer/scheduler/scaler/RNG in place; returns the metadata
     (epoch, history, best score, ...)."""
     ckpt = _load(path, device)
-    model.load_state_dict(ckpt["model_state"])
+    if "optimizer_state" not in ckpt:
+        raise ValueError(f"{path} is an inference checkpoint (e.g. best_model.pth) without "
+                         "optimizer state; resume from last.pth instead.")
+    try:
+        model.load_state_dict(ckpt["model_state"])
+    except RuntimeError as exc:
+        raise ValueError(f"{path} does not match the current model: did model.* settings or "
+                         f"data.freq_threshold (vocabulary size) change since it was saved? "
+                         f"{str(exc).splitlines()[0]}") from exc
     optimizer.load_state_dict(ckpt["optimizer_state"])
     scheduler.load_state_dict(ckpt["scheduler_state"])
     if scaler is not None and ckpt.get("scaler_state"):
